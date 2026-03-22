@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import glob
 import time
@@ -17,9 +18,14 @@ from picamera2.outputs import FileOutput
 
 # Rotation support (hardware transform)
 try:
-    from libcamera import Transform
+    from libcamera import Transform, controls
 except Exception:
     Transform = None
+    controls = None
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 
 # --------------------
@@ -88,7 +94,34 @@ stream_output = StreamingOutput()
 # --------------------
 shutdown_evt = Event()
 camera_lock = Lock()
-picam2 = Picamera2(0)
+
+
+def create_picamera(retries: int = 10, retry_delay: float = 1.0):
+    last_count = 0
+    for attempt in range(1, retries + 1):
+        camera_info = Picamera2.global_camera_info()
+        last_count = len(camera_info)
+        if camera_info:
+            selected = camera_info[0]
+            camera_num = selected.get("Num", 0)
+            camera_model = selected.get("Model") or selected.get("Id") or "unknown"
+            logger.info("Using camera %s (%s)", camera_num, camera_model)
+            return Picamera2(camera_num)
+        if attempt < retries:
+            logger.warning(
+                "No cameras detected by libcamera yet; retrying in %.1fs (%d/%d)",
+                retry_delay,
+                attempt,
+                retries,
+            )
+            time.sleep(retry_delay)
+
+    raise RuntimeError(
+        f"No cameras detected by libcamera after {retries} attempts; last detected count={last_count}."
+    )
+
+
+picam2 = create_picamera()
 
 caminfo_lock = Lock()
 caminfo = {"main_w": 1280, "main_h": 720, "lores_w": 320, "lores_h": 240, "down_w": 160, "down_h": 120}
@@ -203,6 +236,22 @@ def _stop_record_encoder():
     h264_output = None
 
 
+def _apply_autofocus_if_supported():
+    if controls is None:
+        logger.info("Autofocus controls unavailable in libcamera; skipping.")
+        return
+
+    if "AfMode" not in picam2.camera_controls:
+        logger.info("Camera does not expose autofocus controls; skipping.")
+        return
+
+    try:
+        picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+        logger.info("Applied continuous autofocus controls.")
+    except Exception as exc:
+        logger.warning("Failed to apply autofocus controls: %s", exc)
+
+
 def apply_camera_config(rotation_deg: int):
     rotation_deg = int(rotation_deg) % 360
     if rotation_deg not in (0, 90, 180, 270):
@@ -233,6 +282,7 @@ def apply_camera_config(rotation_deg: int):
 
         picam2.configure(config)
         picam2.start()
+        _apply_autofocus_if_supported()
         _update_caminfo(main_size, lores_size)
 
         _start_stream_encoder()

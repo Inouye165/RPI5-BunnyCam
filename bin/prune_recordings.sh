@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-DIR="/home/<user>/camera_site/recordings"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+DIR="$REPO_DIR/recordings"
 KEEP=30
 
 shopt -s nullglob
