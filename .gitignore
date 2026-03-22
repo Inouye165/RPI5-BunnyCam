@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.cache/
+.direnv/
+.ipynb_checkpoints/
 .coverage
 .coverage.*
 htmlcov/
@@ -20,6 +23,8 @@ venv/
 .idea/
 .vscode/
 *.code-workspace
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *.tmp
@@ -30,6 +35,7 @@ venv/
 *.sqlite
 *.sqlite3
 *.db
+*.orig
 *.pem
 *.key
 *.p12
