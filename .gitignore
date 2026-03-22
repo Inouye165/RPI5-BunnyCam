@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+recordings/
+recordings_mp4/
+snapshots/
+*.log
+.env
+.venv/
+venv/
+*.bak
