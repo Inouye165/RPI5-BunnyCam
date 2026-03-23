@@ -41,3 +41,15 @@ Thumbs.db
 *.p12
 *.pfx
 *.bak
+
+# ML models (large binaries – download on first run)
+*.pt
+*.onnx
+*.tflite
+
+# Face encodings and enrolled photos (personal data – never commit)
+faces/*.npy
+faces/*.jpg
+faces/*.jpeg
+faces/*.png
+faces/*.webp

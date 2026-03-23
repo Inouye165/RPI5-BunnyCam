@@ -16,6 +16,11 @@ from picamera2 import Picamera2
 from picamera2.encoders import JpegEncoder, H264Encoder
 from picamera2.outputs import FileOutput
 
+try:
+    from waitress import serve as waitress_serve
+except ImportError:
+    waitress_serve = None
+
 # Rotation support (hardware transform)
 try:
     from libcamera import Transform, controls
@@ -23,9 +28,22 @@ except Exception:
     Transform = None
     controls = None
 
+# Object detection + face recognition (optional — degrades gracefully if missing)
+try:
+    import detect as _detect
+except Exception as _det_exc:
+    _detect = None  # type: ignore
+    logging.getLogger(__name__).warning("detect module unavailable: %s", _det_exc)
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+FOCUS_WINDOW_FRACTION    = 0.25  # 25% of frame per axis
+FOCUS_LENS_DELTA_MIN     = 0.02
+FOCUS_SWEEP_COARSE_STEPS = 20   # coarse pass across full lens range
+FOCUS_SWEEP_FINE_STEPS   = 12   # fine pass around coarse peak
+FOCUS_SWEEP_SETTLE_S     = 0.08 # per step: drain stale frame + lens settle (~2.5 s total)
 
 
 # --------------------
@@ -133,15 +151,13 @@ h264_encoder = None
 h264_output = None
 
 
-# --------------------
-# Background model / motion state
-# --------------------
+# reconfigure_q: camera reconfigs are queued here and executed by a dedicated thread
+# so they never block Flask request threads.
+reconfigure_q: Queue = Queue(maxsize=1)
 bg_lock = Lock()
-bg_model = {"bg": None, "warmup": 3}
-
 state_lock = Lock()
+bg_model = {"bg": None, "warmup": 3}
 motion_state = {
-    "motion": False,
     "events": 0,
     "last_motion_ts": None,
     "last_snapshot": None,
@@ -252,6 +268,203 @@ def _apply_autofocus_if_supported():
         logger.warning("Failed to apply autofocus controls: %s", exc)
 
 
+def _camera_supports_autofocus():
+    return controls is not None and all(
+        name in picam2.camera_controls for name in ("AfMode", "AfMetering", "AfWindows")
+    )
+
+
+def _focus_state_name(value):
+    if hasattr(value, "name"):
+        return value.name.lower()
+    return str(value).lower()
+
+
+def _focus_metadata_payload(metadata, focused=None, window=None):
+    return {
+        "ok": True,
+        "supported": True,
+        "focused": focused,
+        "af_state": _focus_state_name(metadata.get("AfState", "unknown")),
+        "lens_position": metadata.get("LensPosition"),
+        "window": window,
+    }
+
+
+def _lens_position_value(metadata):
+    value = metadata.get("LensPosition")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _focus_window_from_norm(x_norm: float, y_norm: float):
+    x_norm = max(0.0, min(1.0, float(x_norm)))
+    y_norm = max(0.0, min(1.0, float(y_norm)))
+
+    _min_window, max_window, _default_window = picam2.camera_controls["AfWindows"]
+    max_width = max(1, int(max_window[2]))
+    max_height = max(1, int(max_window[3]))
+
+    window_width = max(1, int(max_width * FOCUS_WINDOW_FRACTION))
+    window_height = max(1, int(max_height * FOCUS_WINDOW_FRACTION))
+    left = int(round(x_norm * max_width - (window_width / 2)))
+    top = int(round(y_norm * max_height - (window_height / 2)))
+    left = max(0, min(max_width - window_width, left))
+    top = max(0, min(max_height - window_height, top))
+    return [left, top, window_width, window_height]
+
+
+def _sharpness_at(frame, crop_box: tuple) -> float:
+    """Variance of the 2-D Laplacian over the crop region — higher = sharper."""
+    y0, y1, x0, x1 = crop_box
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return 0.0
+    gray = (0.299 * crop[:, :, 0] + 0.587 * crop[:, :, 1] + 0.114 * crop[:, :, 2]).astype(np.float32)
+    return float(np.var(np.diff(gray, n=2, axis=1)) + np.var(np.diff(gray, n=2, axis=0)))
+
+
+def _sweep_positions(lens_min: float, lens_max: float, steps: int) -> list[float]:
+    return [lens_min + (lens_max - lens_min) * i / (steps - 1) for i in range(steps)]
+
+
+def _measure_at(pos: float, crop_box: tuple) -> float:
+    """Move lens to pos, drain the stale in-flight frame, settle, then score sharpness."""
+    with camera_lock:
+        picam2.set_controls({"AfMode": controls.AfModeEnum.Manual, "LensPosition": pos})
+    capture_lores_array()          # discard the frame already buffered before control applied
+    time.sleep(FOCUS_SWEEP_SETTLE_S)
+    frame = capture_lores_array()
+    if frame is None:
+        return 0.0
+    return _sharpness_at(frame, crop_box)
+
+
+def _contrast_detect_sweep(x_norm: float, y_norm: float) -> float | None:
+    """
+    Two-pass contrast-detect AF — no PDAF, no libcamera AF algorithm.
+
+    1. Coarse pass across the full lens range to locate the approximate peak.
+    2. Fine pass over ±1 coarse step around that peak for sub-step precision.
+
+    AEC/AGC is locked for the entire sweep so that brightness fluctuations
+    (which change pixel values regardless of focus) cannot corrupt the scores.
+    """
+    if "LensPosition" not in picam2.camera_controls:
+        return None
+
+    lens_range = picam2.camera_controls["LensPosition"]
+    lens_min = float(lens_range[0])   # 0.0 = optical infinity
+    lens_max = float(lens_range[1])   # ~15.0 = macro
+
+    # Build crop box from lores frame dimensions
+    probe = capture_lores_array()
+    if probe is None:
+        return None
+    fh, fw = probe.shape[:2]
+    half_w = max(1, int(fw * FOCUS_WINDOW_FRACTION / 2))
+    half_h = max(1, int(fh * FOCUS_WINDOW_FRACTION / 2))
+    cx = max(half_w, min(fw - half_w, int(x_norm * fw)))
+    cy = max(half_h, min(fh - half_h, int(y_norm * fh)))
+    crop_box = (cy - half_h, cy + half_h, cx - half_w, cx + half_w)
+
+    # Lock AEC/AGC: freeze exposure & gain so sharpness scores are comparable
+    lock_meta = picam2.capture_metadata()
+    exp_time = lock_meta.get("ExposureTime")
+    gain = lock_meta.get("AnalogueGain")
+    aec_locked = bool(exp_time and gain)
+    if aec_locked:
+        with camera_lock:
+            picam2.set_controls({"AeEnable": False,
+                                 "ExposureTime": int(exp_time),
+                                 "AnalogueGain": float(gain)})
+        time.sleep(0.05)   # let the AEC lock take effect
+
+    try:
+        # --- Coarse pass: full range ---
+        coarse_positions = _sweep_positions(lens_min, lens_max, FOCUS_SWEEP_COARSE_STEPS)
+        coarse_scores = [_measure_at(p, crop_box) for p in coarse_positions]
+        best_coarse_idx = int(np.argmax(coarse_scores))
+        best_coarse_pos = coarse_positions[best_coarse_idx]
+
+        # --- Fine pass: ±1 coarse step around the peak ---
+        coarse_step = (lens_max - lens_min) / (FOCUS_SWEEP_COARSE_STEPS - 1)
+        fine_min = max(lens_min, best_coarse_pos - coarse_step)
+        fine_max = min(lens_max, best_coarse_pos + coarse_step)
+        fine_positions = _sweep_positions(fine_min, fine_max, FOCUS_SWEEP_FINE_STEPS)
+        fine_scores = [_measure_at(p, crop_box) for p in fine_positions]
+        best_pos = fine_positions[int(np.argmax(fine_scores))]
+
+    finally:
+        # Always restore auto-exposure regardless of what happened above
+        if aec_locked:
+            with camera_lock:
+                picam2.set_controls({"AeEnable": True})
+
+    return best_pos
+
+
+def _trigger_click_focus(x_norm: float, y_norm: float):
+    if not _camera_supports_autofocus():
+        return {"ok": False, "supported": False, "error": "Camera does not support autofocus."}
+
+    af_window = _focus_window_from_norm(x_norm, y_norm)
+    before_metadata = picam2.capture_metadata()
+    before_lens = _lens_position_value(before_metadata)
+
+    # Contrast-detect sweep: step through full lens range in Manual mode and
+    # measure sharpness of the tapped region at each position.  This bypasses
+    # PDAF entirely, so close/macro subjects are found correctly.
+    best_pos = _contrast_detect_sweep(x_norm, y_norm)
+
+    if best_pos is not None:
+        with camera_lock:
+            picam2.set_controls({
+                "AfMode": controls.AfModeEnum.Manual,
+                "LensPosition": best_pos,
+            })
+    else:
+        with camera_lock:
+            picam2.set_controls({
+                "AfMode": controls.AfModeEnum.Continuous,
+                "AfMetering": controls.AfMeteringEnum.Auto,
+            })
+
+    metadata = picam2.capture_metadata()
+    after_lens = _lens_position_value(metadata)
+    focused = best_pos is not None
+    lens_delta = abs(after_lens - before_lens) if (after_lens is not None and before_lens is not None) else None
+
+    payload = _focus_metadata_payload(metadata, focused=focused, window=af_window)
+    payload["lens_before"] = before_lens
+    payload["lens_after"] = after_lens
+    payload["lens_delta"] = lens_delta
+    payload["cycle_result"] = focused
+    payload["status"] = "focused" if focused else "failed"
+    payload["focus_mode"] = "manual_hold" if focused else "continuous"
+    payload["x_norm"] = max(0.0, min(1.0, float(x_norm)))
+    payload["y_norm"] = max(0.0, min(1.0, float(y_norm)))
+    return payload
+
+
+def _reset_focus_mode():
+    if not _camera_supports_autofocus():
+        return {"ok": False, "supported": False, "error": "Camera does not support autofocus."}
+
+    with camera_lock:
+        picam2.set_controls({
+            "AfMode": controls.AfModeEnum.Continuous,
+            "AfMetering": controls.AfMeteringEnum.Auto,
+        })
+        metadata = picam2.capture_metadata()
+
+    return _focus_metadata_payload(metadata, focused=None, window=None)
+
+
 def apply_camera_config(rotation_deg: int):
     rotation_deg = int(rotation_deg) % 360
     if rotation_deg not in (0, 90, 180, 270):
@@ -295,8 +508,8 @@ def apply_camera_config(rotation_deg: int):
 
 
 def capture_lores_array():
-    with camera_lock:
-        return picam2.capture_array("lores")
+    # Picamera2.capture_array() is internally thread-safe; no app-level lock needed.
+    return picam2.capture_array("lores")
 
 
 def save_snapshot(jpeg_bytes: bytes) -> str:
@@ -579,6 +792,36 @@ def load_existing_mp4_manifest():
     prune_mp4()
 
 
+def reconfig_worker():
+    """Handles camera reconfigurations off the Flask request threads."""
+    while not shutdown_evt.is_set():
+        try:
+            item = reconfigure_q.get(timeout=0.5)
+        except Empty:
+            continue
+        if item is None:
+            break
+        rotation = item
+        try:
+            apply_camera_config(rotation)
+            with config_lock:
+                roi_norm = cfg["roi_norm"]
+            if roi_norm is not None:
+                with caminfo_lock:
+                    lw, lh = caminfo["lores_w"], caminfo["lores_h"]
+                x1f, y1f, x2f, y2f = roi_norm
+                x1 = int(max(0.0, min(1.0, x1f)) * lw)
+                x2 = int(max(0.0, min(1.0, x2f)) * lw)
+                y1 = int(max(0.0, min(1.0, y1f)) * lh)
+                y2 = int(max(0.0, min(1.0, y2f)) * lh)
+                with config_lock:
+                    cfg["roi_lores"] = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+        except Exception as exc:
+            logger.warning("reconfig_worker error: %s", exc)
+        finally:
+            reconfigure_q.task_done()
+
+
 # --------------------
 # Flask app + UI (Live + Playback)
 # --------------------
@@ -589,6 +832,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
   <title>Pi Security Cam</title>
   <style>
     body { font-family: sans-serif; margin: 16px; }
@@ -620,9 +864,63 @@ INDEX_HTML = r"""<!doctype html>
       background: rgba(0, 140, 255, 0.12);
       display:none; pointer-events:none; border-radius: 8px;
     }
+        .focusTarget {
+            position:absolute; width: 84px; height: 84px;
+            border: 3px solid rgba(255, 176, 0, 0.98);
+            border-radius: 18px;
+            transform: translate(-50%, -50%);
+            display:none; pointer-events:none;
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.8) inset, 0 0 24px rgba(255, 176, 0, 0.45);
+            background: radial-gradient(circle at center, rgba(255,255,255,0.18) 0, rgba(255,255,255,0.08) 18%, rgba(255,176,0,0.06) 19%, rgba(255,176,0,0) 60%);
+            animation: focusPulse 0.9s ease-out 1;
+        }
+        .focusTarget::before,
+        .focusTarget::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 244, 214, 0.95);
+            left: 50%; top: 50%;
+            transform: translate(-50%, -50%);
+            border-radius: 999px;
+        }
+        .focusTarget::before { width: 3px; height: 28px; }
+        .focusTarget::after { width: 28px; height: 3px; }
+        .focusStatus { min-height: 18px; }
+        .focusStatus[data-state="pending"] { color: #8a5b00; }
+        .focusStatus[data-state="ok"] { color: #166534; }
+        .focusStatus[data-state="error"] { color: #991b1b; }
+        @keyframes focusPulse {
+            0% { opacity: 0.2; transform: translate(-50%, -50%) scale(0.72); }
+            45% { opacity: 1; transform: translate(-50%, -50%) scale(1.06); }
+            100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        }
     .hint { font-size: 13px; opacity: 0.85; margin: 8px 0 0; }
     code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 8px; }
+    .focus-row {
+        display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+        margin:8px 0; padding:10px 14px;
+        background:#fff8e1; border:2px solid #f9a825; border-radius:12px;
+    }
+    .focus-row .focus-title { font-size:14px; font-weight:800; color:#795548; white-space:nowrap; }
+    .focus-side { font-size:12px; opacity:0.7; }
+    .focus-dist-hint { font-size:11px; color:#888; margin-left:4px; }
+    #lensSlider { accent-color: #f57c00; }
     .hidden { display:none; }
+
+    /* --- Detection overlay --- */
+    #detectCanvas {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; border-radius: 12px;
+    }
+    .detect-panel {
+      margin: 8px 0; padding: 10px 14px;
+      background: #f0f4ff; border: 2px solid #5a7bd8; border-radius: 12px;
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    }
+    .detect-title { font-size: 14px; font-weight: 800; color: #2c4a9e; white-space: nowrap; }
+    .detect-seen  { font-size: 13px; min-width: 100px; color: #333; }
+    #enrollForm   { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    #enrollName   { padding: 6px 8px; border-radius: 8px; border: 1px solid #5a7bd8; width: 110px; }
   </style>
 </head>
 <body>
@@ -648,7 +946,28 @@ INDEX_HTML = r"""<!doctype html>
         </select>
         <button id="applyRot" type="button">Apply rotation</button>
         <button id="clearRoi" type="button">Clear area</button>
+                <button id="resetFocus" type="button">Reset focus</button>
       </div>
+    </div>
+
+    <div id="focusRow" class="focus-row hidden">
+      <span class="focus-title">&#x1F50D; Manual Focus</span>
+      <span class="focus-side">Far (&#x221e;)</span>
+      <input id="lensSlider" type="range" min="0" max="15" step="0.1" style="width:min(400px,45vw);"/>
+      <span class="focus-side">Close (macro)</span>
+      <span id="lensVal" style="font-size:15px;font-weight:800;min-width:52px;text-align:center;background:#fff;padding:3px 8px;border-radius:8px;border:1px solid #f9a825;">auto</span>
+      <span id="lensDistHint" class="focus-dist-hint"></span>
+      <button id="focusAutoBtn" type="button" style="background:#fff8e1;border-color:#f9a825;font-weight:700;">&#x21BA; Auto AF</button>
+    </div>
+
+    <div id="detectPanel" class="detect-panel">
+      <span class="detect-title">&#x1F50E; Detect</span>
+      <span id="detectSeen" class="detect-seen">&#x23F3; starting…</span>
+      <form id="enrollForm" onsubmit="return enrollFace(event)">
+        <input id="enrollName"  type="text" placeholder="Name (Ron / Trisha)" maxlength="32"/>
+        <input id="enrollPhoto" type="file" accept="image/*" style="font-size:12px;max-width:170px"/>
+        <button type="submit" style="padding:6px 10px;border-radius:8px;border:1px solid #5a7bd8;background:#f0f4ff;font-weight:700;">&#x270F; Enroll face</button>
+      </form>
     </div>
 
     <div id="top" class="top ok">
@@ -672,6 +991,8 @@ INDEX_HTML = r"""<!doctype html>
     <div id="liveWrap" class="videoWrap">
       <img id="cam" src="/stream.mjpg" alt="stream"/>
       <div id="roiBox" class="roi"></div>
+            <div id="focusBox" class="focusTarget"></div>
+            <canvas id="detectCanvas"></canvas>
     </div>
 
     <!-- Playback -->
@@ -689,9 +1010,10 @@ INDEX_HTML = r"""<!doctype html>
     </div>
 
     <div class="hint">
-      Drag on Live video to select the monitored area (ROI). Playback uses MP4 segments made from your rolling recording.
+            Drag on Live video to select the monitored area (ROI). Tap or click the Live video to focus that area. Playback uses MP4 segments made from your rolling recording.
       Recordings list: <code>/dvr/manifest</code>
     </div>
+        <div id="focusStatus" class="hint focusStatus"></div>
     <div id="meta" class="meta"></div>
   </div>
 
@@ -709,7 +1031,15 @@ const liveWrap = document.getElementById('liveWrap');
 const playWrap = document.getElementById('playWrap');
 
 const wrap = liveWrap;
+const cam = document.getElementById('cam');
 const roiBox = document.getElementById('roiBox');
+const focusBox = document.getElementById('focusBox');
+const focusStatus = document.getElementById('focusStatus');
+const resetFocusBtn = document.getElementById('resetFocus');
+const lensSlider = document.getElementById('lensSlider');
+const lensVal = document.getElementById('lensVal');
+const focusRow = document.getElementById('focusRow');
+const focusAutoBtn = document.getElementById('focusAutoBtn');
 const thr = document.getElementById('thr');
 const thrVal = document.getElementById('thrVal');
 const minpx = document.getElementById('minpx');
@@ -755,7 +1085,49 @@ function buzz() {
 }
 
 async function postJSON(url, body) {
-  await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!r.ok) {
+        throw new Error(data.error || ('Request failed: ' + r.status));
+    }
+    return data;
+}
+
+function setFocusStatus(text, state) {
+    focusStatus.textContent = text || '';
+    focusStatus.dataset.state = state || '';
+}
+
+function drawFocusTarget(norm) {
+    if (!norm) {
+        focusBox.style.display = 'none';
+        return;
+    }
+    const r = cam.getBoundingClientRect();
+    focusBox.style.left = (norm[0] * r.width) + 'px';
+    focusBox.style.top = (norm[1] * r.height) + 'px';
+    focusBox.style.animation = 'none';
+    void focusBox.offsetWidth;
+    focusBox.style.animation = '';
+    focusBox.style.display = 'block';
+}
+
+async function focusAt(xNorm, yNorm) {
+    drawFocusTarget([xNorm, yNorm]);
+    setFocusStatus('focusing lens...', 'pending');
+    try {
+        const result = await postJSON('/focus', { x_norm: xNorm, y_norm: yNorm });
+        if (result.status === 'focused' || result.status === 'adjusted') {
+            const lp = result.lens_after != null ? ' \u2014 pos ' + result.lens_after.toFixed(2) : '';
+            setFocusStatus('\u2713 focused' + lp, 'ok');
+            if (result.lens_after != null) setLensDisplay(result.lens_after);
+        } else {
+            setFocusStatus('tap focus failed \u2014 use Manual Focus slider above', 'error');
+        }
+    } catch (e) {
+        setFocusStatus(e.message || 'focus failed', 'error');
+    }
 }
 
 // Tabs
@@ -797,6 +1169,70 @@ document.getElementById('clearRoi').addEventListener('click', async () => {
   roiBox.style.display = 'none';
 });
 
+resetFocusBtn.addEventListener('click', async () => {
+    try {
+        await postJSON('/focus/reset', {});
+        setFocusStatus('auto focus restored', 'ok');
+        lensVal.textContent = 'auto';
+        drawFocusTarget(null);
+    } catch (e) {
+        setFocusStatus(e.message || 'focus reset failed', 'error');
+    }
+});
+
+focusAutoBtn.addEventListener('click', async () => {
+    try {
+        await postJSON('/focus/reset', {});
+        setFocusStatus('auto focus restored', 'ok');
+        lensVal.textContent = 'auto';
+        drawFocusTarget(null);
+    } catch (e) {
+        setFocusStatus(e.message || 'focus reset failed', 'error');
+    }
+});
+
+function distHint(pos) {
+    const p = parseFloat(pos);
+    if (isNaN(p) || p <= 0) return '\u221e (far)';
+    const m = 1.0 / p;
+    if (m >= 3) return m.toFixed(0) + ' m';
+    if (m >= 0.5) return m.toFixed(1) + ' m';
+    return (m * 100).toFixed(0) + ' cm';
+}
+
+function setLensDisplay(pos) {
+    if (pos == null || isNaN(Number(pos))) {
+        lensVal.textContent = 'auto';
+        lensDistHint.textContent = '';
+        return;
+    }
+    const p = parseFloat(pos);
+    if (p >= parseFloat(lensSlider.min) && p <= parseFloat(lensSlider.max)) {
+        lensSlider.value = String(p);
+    }
+    lensVal.textContent = p.toFixed(1);
+    lensDistHint.textContent = '\u2248 ' + distHint(p);
+}
+
+const lensDistHint = document.getElementById('lensDistHint');
+
+let lensDebounce = null;
+lensSlider.addEventListener('input', () => {
+    const pos = parseFloat(lensSlider.value);
+    lensVal.textContent = pos.toFixed(1);
+    lensDistHint.textContent = '\u2248 ' + distHint(pos);
+    clearTimeout(lensDebounce);
+    lensDebounce = setTimeout(async () => {
+        try {
+            await postJSON('/focus/lens', { lens_pos: pos });
+            setFocusStatus('manual focus at ' + pos.toFixed(1) + ' (' + distHint(pos) + ')', 'ok');
+            drawFocusTarget(null);
+        } catch(e) {
+            setFocusStatus(e.message || 'focus failed', 'error');
+        }
+    }, 120);
+});
+
 // Sensitivity sliders
 thr.addEventListener('input', () => { setSliderText(); postJSON('/set_sensitivity', { pixel_diff_threshold: Number(thr.value), min_changed_pixels: Number(minpx.value) }); });
 minpx.addEventListener('input', () => { setSliderText(); postJSON('/set_sensitivity', { pixel_diff_threshold: Number(thr.value), min_changed_pixels: Number(minpx.value) }); });
@@ -814,38 +1250,59 @@ function drawRoi(norm) {
 }
 
 let dragging = false;
+let pointerActive = false;
 let startX = 0, startY = 0;
+const TAP_DRAG_THRESHOLD = 0.01;
 function clamp01(v){ return Math.max(0, Math.min(1, v)); }
 
 wrap.addEventListener('pointerdown', (e) => {
   // only in live mode
   if (liveWrap.classList.contains('hidden')) return;
   const r = wrap.getBoundingClientRect();
-  dragging = true;
+    pointerActive = true;
+    dragging = false;
   startX = clamp01((e.clientX - r.left) / r.width);
   startY = clamp01((e.clientY - r.top) / r.height);
-  roiNorm = [startX, startY, startX, startY];
-  drawRoi(roiNorm);
   wrap.setPointerCapture(e.pointerId);
 });
 
 wrap.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
+    if (!pointerActive) return;
   const r = wrap.getBoundingClientRect();
   const x = clamp01((e.clientX - r.left) / r.width);
   const y = clamp01((e.clientY - r.top) / r.height);
+    if (!dragging && (Math.abs(x - startX) >= TAP_DRAG_THRESHOLD || Math.abs(y - startY) >= TAP_DRAG_THRESHOLD)) {
+        dragging = true;
+        roiNorm = [startX, startY, startX, startY];
+    }
+    if (!dragging) return;
   roiNorm = [Math.min(startX,x), Math.min(startY,y), Math.max(startX,x), Math.max(startY,y)];
   drawRoi(roiNorm);
 });
 
 wrap.addEventListener('pointerup', async () => {
-  if (!dragging) return;
-  dragging = false;
+    if (!pointerActive) return;
+    pointerActive = false;
+    if (!dragging) {
+        await focusAt(startX, startY);
+        return;
+    }
+    dragging = false;
   const w = roiNorm[2] - roiNorm[0];
   const h = roiNorm[3] - roiNorm[1];
-  if (w < 0.02 || h < 0.02) { roiNorm = null; roiBox.style.display = 'none'; return; }
+    if (w < 0.02 || h < 0.02) {
+        roiNorm = null;
+        roiBox.style.display = 'none';
+        await focusAt(startX, startY);
+        return;
+    }
   await postJSON('/set_roi', { roi_norm: roiNorm });
   await postJSON('/calibrate', {});
+});
+
+wrap.addEventListener('pointercancel', () => {
+    pointerActive = false;
+    dragging = false;
 });
 
 // DVR: load manifest, map slider to segments
@@ -966,9 +1423,18 @@ async function loadConfig(){
   thr.value = c.pixel_diff_threshold;
   minpx.value = c.min_changed_pixels;
   rotSel.value = String(c.rotation);
+    resetFocusBtn.disabled = !c.focus_supported;
   setSliderText();
   roiNorm = c.roi_norm;
   drawRoi(roiNorm);
+    if (!c.focus_supported) {
+        setFocusStatus('click focus unavailable on this camera', 'error');
+    } else if (c.lens_pos_max != null) {
+        lensSlider.min = String(c.lens_pos_min != null ? c.lens_pos_min : 0);
+        lensSlider.max = String(c.lens_pos_max != null ? c.lens_pos_max : 10);
+        lensSlider.step = '0.05';
+        focusRow.classList.remove('hidden');
+    }
 }
 loadConfig();
 fetchManifest();
@@ -976,6 +1442,88 @@ setInterval(fetchManifest, 2000);
 
 setInterval(pollStatus, 150);
 pollStatus();
+
+// ── Object detection overlay ────────────────────────────────────────────────
+const detectCanvas = document.getElementById('detectCanvas');
+const detectCtx    = detectCanvas.getContext('2d');
+const detectSeen   = document.getElementById('detectSeen');
+
+const DET_COLORS = {
+  person: '#2196F3', dog: '#4CAF50', cat: '#9C27B0',
+  Ron: '#FF5722', Trisha: '#E91E63',
+};
+function detColor(label, cls) {
+  return DET_COLORS[label] || DET_COLORS[cls] || '#FF9800';
+}
+
+function drawDetections(dets) {
+  const w = detectCanvas.offsetWidth;
+  const h = detectCanvas.offsetHeight;
+  if (!w || !h) return;
+  detectCanvas.width  = w;
+  detectCanvas.height = h;
+  detectCtx.clearRect(0, 0, w, h);
+  detectCtx.font = 'bold 13px sans-serif';
+  for (const d of dets) {
+    const col = detColor(d.label, d.class);
+    const [x1, y1, x2, y2] = d.box;
+    const bx = x1*w, by = y1*h, bw = (x2-x1)*w, bh = (y2-y1)*h;
+    detectCtx.strokeStyle = col;
+    detectCtx.lineWidth   = 2.5;
+    detectCtx.strokeRect(bx, by, bw, bh);
+    const txt = d.label + ' ' + Math.round(d.conf * 100) + '%';
+    const tw  = detectCtx.measureText(txt).width + 10;
+    const ty  = by > 22 ? by - 20 : by + bh;
+    detectCtx.globalAlpha = 0.82;
+    detectCtx.fillStyle   = col;
+    detectCtx.fillRect(bx, ty, tw, 20);
+    detectCtx.globalAlpha = 1;
+    detectCtx.fillStyle   = '#fff';
+    detectCtx.fillText(txt, bx + 5, ty + 14);
+  }
+}
+
+async function pollDetections() {
+  if (liveWrap.classList.contains('hidden')) return;
+  try {
+    const r = await fetch('/detections');
+    const d = await r.json();
+    const dets = d.detections || [];
+    drawDetections(dets);
+    if (!d.enabled) {
+      detectSeen.textContent = 'detection unavailable';
+    } else if (dets.length) {
+      detectSeen.textContent = dets.map(x => x.label).join(', ');
+    } else {
+      detectSeen.textContent = 'nothing detected';
+      detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
+    }
+  } catch(e) {}
+}
+setInterval(pollDetections, 500);
+pollDetections();
+
+async function enrollFace(evt) {
+  evt.preventDefault();
+  const name  = document.getElementById('enrollName').value.trim();
+  const photo = document.getElementById('enrollPhoto').files[0];
+  if (!name || !photo) { alert('Name and photo are both required'); return false; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('photo', photo);
+  try {
+    const r = await fetch('/face/enroll', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.ok) {
+      alert(j.message);
+      document.getElementById('enrollName').value  = '';
+      document.getElementById('enrollPhoto').value = '';
+    } else {
+      alert('Error: ' + j.error);
+    }
+  } catch(e) { alert('Enrollment failed: ' + e); }
+  return false;
+}
 </script>
 </body>
 </html>
@@ -985,6 +1533,16 @@ pollStatus();
 @app.get("/")
 def index():
     return INDEX_HTML
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    return send_from_directory(BASE_DIR, "favicon.svg", mimetype="image/svg+xml")
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    return send_from_directory(BASE_DIR, "favicon.svg", mimetype="image/svg+xml")
 
 
 def gen_frames():
@@ -1025,6 +1583,9 @@ def config_get():
             "record_enabled": cfg["record_enabled"],
             "record_segment_sec": cfg["record_segment_sec"],
             "record_keep_segments": cfg["record_keep_segments"],
+            "focus_supported": _camera_supports_autofocus(),
+            "lens_pos_min": float(picam2.camera_controls["LensPosition"][0]) if "LensPosition" in picam2.camera_controls else None,
+            "lens_pos_max": float(picam2.camera_controls["LensPosition"][1]) if "LensPosition" in picam2.camera_controls else None,
         })
 
 
@@ -1066,6 +1627,60 @@ def set_roi():
     return jsonify({"ok": True})
 
 
+@app.post("/focus")
+def focus_click():
+    data = request.get_json(silent=True) or {}
+    if "x_norm" not in data or "y_norm" not in data:
+        return jsonify({"ok": False, "error": "x_norm and y_norm are required."}), 400
+
+    try:
+        payload = _trigger_click_focus(data["x_norm"], data["y_norm"])
+    except Exception as exc:
+        logger.warning("Click focus failed: %s", exc)
+        return jsonify({"ok": False, "supported": _camera_supports_autofocus(), "error": str(exc)}), 500
+
+    if not payload.get("ok"):
+        return jsonify(payload), 400
+    return jsonify(payload)
+
+
+@app.post("/focus/reset")
+def focus_reset():
+    try:
+        payload = _reset_focus_mode()
+    except Exception as exc:
+        logger.warning("Focus reset failed: %s", exc)
+        return jsonify({"ok": False, "supported": _camera_supports_autofocus(), "error": str(exc)}), 500
+
+    if not payload.get("ok"):
+        return jsonify(payload), 400
+    return jsonify(payload)
+
+
+@app.post("/focus/lens")
+def focus_lens_manual():
+    if not _camera_supports_autofocus():
+        return jsonify({"ok": False, "error": "Autofocus controls unavailable."}), 400
+    if "LensPosition" not in picam2.camera_controls:
+        return jsonify({"ok": False, "error": "LensPosition control unavailable."}), 400
+
+    data = request.get_json(silent=True) or {}
+    if "lens_pos" not in data:
+        return jsonify({"ok": False, "error": "lens_pos required"}), 400
+
+    try:
+        lens_pos = float(data["lens_pos"])
+        with camera_lock:
+            picam2.set_controls({
+                "AfMode": controls.AfModeEnum.Manual,
+                "LensPosition": lens_pos,
+            })
+        return jsonify({"ok": True, "lens_pos": lens_pos})
+    except Exception as exc:
+        logger.warning("Manual lens focus failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.post("/calibrate")
 def calibrate():
     _reset_background()
@@ -1087,21 +1702,12 @@ def set_rotation():
     with config_lock:
         cfg["rotation"] = rotation
 
-    apply_camera_config(rotation)
-
-    # Recompute ROI pixels for new lores dimensions
-    with config_lock:
-        roi_norm = cfg["roi_norm"]
-    if roi_norm is not None:
-        with caminfo_lock:
-            lw, lh = caminfo["lores_w"], caminfo["lores_h"]
-        x1f, y1f, x2f, y2f = roi_norm
-        x1 = int(max(0.0, min(1.0, x1f)) * lw)
-        x2 = int(max(0.0, min(1.0, x2f)) * lw)
-        y1 = int(max(0.0, min(1.0, y1f)) * lh)
-        y2 = int(max(0.0, min(1.0, y2f)) * lh)
-        with config_lock:
-            cfg["roi_lores"] = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+    # Queue the heavy camera reconfig so this request thread returns immediately.
+    # Drop if a reconfig is already queued (only the latest rotation matters).
+    try:
+        reconfigure_q.put_nowait(rotation)
+    except Exception:
+        pass  # queue full – a reconfig is already pending
 
     return jsonify({"ok": True})
 
@@ -1121,6 +1727,36 @@ def dvr_manifest():
 @app.get("/dvr/<path:name>")
 def dvr_get(name):
     return send_from_directory(RECORD_DIR_MP4, name, as_attachment=False)
+
+
+@app.get("/detections")
+def detections_get():
+    if _detect is None:
+        return jsonify({"detections": [], "total": 0, "model": "none", "enabled": False})
+    return jsonify({**_detect.get_detections(), "enabled": True})
+
+
+@app.get("/face/list")
+def face_list():
+    if _detect is None:
+        return jsonify({"names": [], "enabled": False})
+    return jsonify({"names": _detect.list_faces(), "enabled": True})
+
+
+@app.post("/face/enroll")
+def face_enroll():
+    if _detect is None:
+        return jsonify({"ok": False, "error": "detection not available"}), 400
+    name = request.form.get("name", "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    photo = request.files.get("photo")
+    if not photo:
+        return jsonify({"ok": False, "error": "photo required"}), 400
+    ok, msg = _detect.enroll_face(name, photo.read())
+    if ok:
+        return jsonify({"ok": True, "message": msg})
+    return jsonify({"ok": False, "error": msg}), 400
 
 
 def _graceful_shutdown(signum, frame):
@@ -1146,11 +1782,21 @@ def main():
 
     apply_camera_config(cfg["rotation"])
 
+    if _detect is not None:
+        _detect.start(capture_lores_array)
+
     Thread(target=motion_loop, daemon=True).start()
     Thread(target=rolling_record_loop, daemon=True).start()
     Thread(target=convert_worker, daemon=True).start()
+    Thread(target=reconfig_worker, daemon=True).start()
 
-    app.run(host="0.0.0.0", port=8000, threaded=True)
+    if waitress_serve is not None:
+        logger.info("Starting on http://0.0.0.0:8000 (waitress)")
+        waitress_serve(app, host="0.0.0.0", port=8000, threads=8,
+                       channel_timeout=60, cleanup_interval=10)
+    else:
+        logger.warning("waitress not available, falling back to Flask dev server")
+        app.run(host="0.0.0.0", port=8000, threaded=True)
 
 
 if __name__ == "__main__":
