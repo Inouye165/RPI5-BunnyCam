@@ -40,34 +40,53 @@ FACES_DIR = os.path.join(os.path.dirname(__file__), "faces")
 
 # ── module-level state ────────────────────────────────────────────────────────
 _lock        = threading.Lock()
-_yolo        = None          # ultralytics YOLO instance
-_fr          = None          # face_recognition module reference
+_models: dict = {"yolo": None, "fr": None}
 _known_names: list[str]       = []
 _known_encs:  list[np.ndarray] = []
 _latest: dict = {"detections": [], "ts": 0.0, "model": "none"}
+_status: dict = {
+    "detection_enabled": False,
+    "detection_reason": "YOLO model not loaded yet",
+    "face_recognition_enabled": False,
+    "face_recognition_reason": "face_recognition not loaded",
+}
 _stop         = threading.Event()
 
 
 # ── model / face loading ──────────────────────────────────────────────────────
 
+def _set_detection_status(enabled: bool, reason: str | None) -> None:
+    """Persist person detection readiness for status endpoints."""
+    with _lock:
+        _status["detection_enabled"] = bool(enabled)
+        _status["detection_reason"] = reason
+
+
+def _set_face_status(enabled: bool, reason: str | None) -> None:
+    """Persist face recognition readiness independently from person detection."""
+    with _lock:
+        _status["face_recognition_enabled"] = bool(enabled)
+        _status["face_recognition_reason"] = reason
+
 def _load_yolo() -> None:
-    global _yolo
     try:
         from ultralytics import YOLO  # type: ignore
-        _yolo = YOLO("yolov8n.pt")    # downloads ~6 MB on first run
+        _models["yolo"] = YOLO("yolov8n.pt")  # downloads ~6 MB on first run
         with _lock:
             _latest["model"] = "yolov8n"
+        _set_detection_status(True, None)
         logger.info("detect: YOLOv8n ready")
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError) as exc:
+        _set_detection_status(False, str(exc))
         logger.warning("detect: YOLO unavailable — %s", exc)
 
 
 def _load_faces() -> None:
-    global _fr
     try:
         import face_recognition as fr  # type: ignore
-        _fr = fr
+        _models["fr"] = fr
     except ImportError:
+        _set_face_status(False, "face_recognition not installed")
         logger.warning("detect: face_recognition not installed — face ID disabled")
         return
 
@@ -83,7 +102,7 @@ def _load_faces() -> None:
             try:
                 encs.append(np.load(path))
                 names.append(stem)
-            except Exception as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning("detect: could not load %s — %s", fname, exc)
 
         elif fname.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -91,8 +110,8 @@ def _load_faces() -> None:
             if os.path.exists(npy):
                 continue  # already encoded
             try:
-                img   = _fr.load_image_file(path)
-                found = _fr.face_encodings(img)
+                img   = fr.load_image_file(path)
+                found = fr.face_encodings(img)
                 if found:
                     np.save(npy, found[0])
                     names.append(stem)
@@ -100,24 +119,26 @@ def _load_faces() -> None:
                     logger.info("detect: auto-encoded face '%s'", stem)
                 else:
                     logger.warning("detect: no face found in %s", fname)
-            except Exception as exc:
+            except (OSError, ValueError, RuntimeError) as exc:
                 logger.warning("detect: error encoding %s — %s", fname, exc)
 
     with _lock:
         _known_names[:] = names
         _known_encs[:]  = encs
+    _set_face_status(True, None)
     logger.info("detect: loaded %d face(s): %s", len(names), names)
 
 
 # ── per-frame inference ───────────────────────────────────────────────────────
 
 def _run(frame_rgb: np.ndarray) -> list[dict]:
-    if _yolo is None:
+    yolo = _models["yolo"]
+    if yolo is None:
         return []
 
     dets: list[dict] = []
     try:
-        results = _yolo.predict(
+        results = yolo.predict(
             frame_rgb,
             conf=DETECT_CONF,
             classes=list(WATCH_CLASSES.keys()),
@@ -137,13 +158,14 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
                     "conf":  round(conf, 2),
                     "box":   [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
                 })
-    except Exception as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         logger.debug("detect: YOLO error — %s", exc)
         return dets
 
-    # ── face recognition ──────────────────────────────────────────────────────
+    # ── face recognition ──────────────────────────────────────────────────────────────
+    fr = _models["fr"]
     person_dets = [d for d in dets if d["class"] == "person"]
-    if not person_dets or _fr is None:
+    if not person_dets or fr is None:
         return dets
 
     with _lock:
@@ -154,13 +176,13 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
 
     try:
         fh, fw   = frame_rgb.shape[:2]
-        face_locs = _fr.face_locations(frame_rgb, model="hog")
+        face_locs = fr.face_locations(frame_rgb, model="hog")
         if not face_locs:
             return dets
-        face_encs = _fr.face_encodings(frame_rgb, face_locs)
+        face_encs = fr.face_encodings(frame_rgb, face_locs)
 
         for face_idx, face_enc in enumerate(face_encs):
-            dists  = _fr.face_distance(k_encs, face_enc)
+            dists  = fr.face_distance(k_encs, face_enc)
             best_i = int(np.argmin(dists))
             if dists[best_i] >= FACE_DIST:
                 continue
@@ -172,12 +194,13 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
             face_cy = (top + bottom) / 2 / fh
             nearest = min(
                 person_dets,
-                key=lambda d: ((d["box"][0] + d["box"][2]) / 2 - face_cx) ** 2
-                            + ((d["box"][1] + d["box"][3]) / 2 - face_cy) ** 2,
+                key=lambda d, cx=face_cx, cy=face_cy:
+                    ((d["box"][0] + d["box"][2]) / 2 - cx) ** 2
+                    + ((d["box"][1] + d["box"][3]) / 2 - cy) ** 2,
             )
             nearest["label"] = name
 
-    except Exception as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         logger.debug("detect: face recognition error — %s", exc)
 
     return dets
@@ -201,7 +224,7 @@ def _worker(get_frame_fn: Callable) -> None:
                 with _lock:
                     _latest["detections"] = dets
                     _latest["ts"]         = time.time()
-        except Exception as exc:
+        except (RuntimeError, ValueError, OSError, TypeError) as exc:
             logger.debug("detect: worker error — %s", exc)
         _stop.wait(max(0.05, interval - (time.time() - t0)))
 
@@ -229,6 +252,18 @@ def get_detections() -> dict:
         }
 
 
+def get_status() -> dict:
+    """Return detection and face-recognition readiness for the app status APIs."""
+    with _lock:
+        return {
+            "detection_enabled": bool(_status["detection_enabled"]),
+            "detection_reason": _status["detection_reason"],
+            "face_recognition_enabled": bool(_status["face_recognition_enabled"]),
+            "face_recognition_reason": _status["face_recognition_reason"],
+            "model": _latest.get("model", "none"),
+        }
+
+
 def list_faces() -> list[str]:
     with _lock:
         return list(_known_names)
@@ -241,7 +276,7 @@ def reload_faces() -> None:
 
 def enroll_face(name: str, image_bytes: bytes) -> tuple[bool, str]:
     """Enroll a face from raw JPEG/PNG bytes.  Thread-safe."""
-    if _fr is None:
+    if _models["fr"] is None:
         return False, "face_recognition not installed"
 
     safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()[:32]
@@ -252,7 +287,7 @@ def enroll_face(name: str, image_bytes: bytes) -> tuple[bool, str]:
         from PIL import Image  # type: ignore
         img  = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         arr  = np.array(img)
-        encs = _fr.face_encodings(arr)
+        encs = _models["fr"].face_encodings(arr)
         if not encs:
             return False, "No face detected — try a clearer front-facing photo"
 
@@ -267,5 +302,5 @@ def enroll_face(name: str, image_bytes: bytes) -> tuple[bool, str]:
                 _known_encs.append(encs[0])
 
         return True, f"Enrolled '{safe}'"
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         return False, str(exc)

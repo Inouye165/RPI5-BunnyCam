@@ -1,0 +1,720 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <title>Pi Security Cam</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    .wrap { max-width: 1600px; margin: 0 auto; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    .top {
+      margin: 12px 0; padding: 10px 12px; border-radius: 12px;
+      font-weight: 700;
+    }
+    .ok { background: #e7f7ea; }
+    .alert { background: #ffe7e7; }
+    .meta { margin-top: 8px; opacity: 0.85; font-size: 14px; }
+    button, select, input[type="range"] { padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; background: #fff; }
+    .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .slider { display:flex; gap:8px; align-items:center; }
+    .slider label { font-size: 13px; font-weight: 600; opacity: 0.9; }
+    .slider span { font-size: 13px; width: 60px; text-align: right; opacity: 0.85; }
+
+    .tabs { display:flex; gap:8px; }
+    .tab { border-radius: 10px; padding: 8px 10px; border:1px solid #ccc; background:#fff; font-weight:700; }
+    .tab.active { background:#111; color:#fff; border-color:#111; }
+
+    .videoWrap { position: relative; width: 100%; }
+    img { width: 100%; border-radius: 12px; display:block; user-select:none; -webkit-user-drag:none; }
+    video { width: 100%; border-radius: 12px; background:#000; }
+
+    .roi {
+      position:absolute; border: 2px solid rgba(0, 140, 255, 0.95);
+      background: rgba(0, 140, 255, 0.12);
+      display:none; pointer-events:none; border-radius: 8px;
+    }
+        .focusTarget {
+            position:absolute; width: 84px; height: 84px;
+            border: 3px solid rgba(255, 176, 0, 0.98);
+            border-radius: 18px;
+            transform: translate(-50%, -50%);
+            display:none; pointer-events:none;
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.8) inset, 0 0 24px rgba(255, 176, 0, 0.45);
+            background: radial-gradient(circle at center, rgba(255,255,255,0.18) 0, rgba(255,255,255,0.08) 18%, rgba(255,176,0,0.06) 19%, rgba(255,176,0,0) 60%);
+            animation: focusPulse 0.9s ease-out 1;
+        }
+        .focusTarget::before,
+        .focusTarget::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 244, 214, 0.95);
+            left: 50%; top: 50%;
+            transform: translate(-50%, -50%);
+            border-radius: 999px;
+        }
+        .focusTarget::before { width: 3px; height: 28px; }
+        .focusTarget::after { width: 28px; height: 3px; }
+        .focusStatus { min-height: 18px; }
+        .focusStatus[data-state="pending"] { color: #8a5b00; }
+        .focusStatus[data-state="ok"] { color: #166534; }
+        .focusStatus[data-state="error"] { color: #991b1b; }
+        @keyframes focusPulse {
+            0% { opacity: 0.2; transform: translate(-50%, -50%) scale(0.72); }
+            45% { opacity: 1; transform: translate(-50%, -50%) scale(1.06); }
+            100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        }
+    .hint { font-size: 13px; opacity: 0.85; margin: 8px 0 0; }
+    code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 8px; }
+    .focus-row {
+        display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+        margin:8px 0; padding:10px 14px;
+        background:#fff8e1; border:2px solid #f9a825; border-radius:12px;
+    }
+    .focus-row .focus-title { font-size:14px; font-weight:800; color:#795548; white-space:nowrap; }
+    .focus-side { font-size:12px; opacity:0.7; }
+    .focus-dist-hint { font-size:11px; color:#888; margin-left:4px; }
+    #lensSlider { accent-color: #f57c00; }
+    .hidden { display:none; }
+
+    /* --- Detection overlay --- */
+    #detectCanvas {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; border-radius: 12px;
+    }
+    .detect-panel {
+      margin: 8px 0; padding: 10px 14px;
+      background: #f0f4ff; border: 2px solid #5a7bd8; border-radius: 12px;
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    }
+    .detect-title { font-size: 14px; font-weight: 800; color: #2c4a9e; white-space: nowrap; }
+    .detect-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 6px;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.5px;
+      text-transform: uppercase; transition: background 0.3s;
+    }
+    .detect-badge.on  { background: #4CAF50; color: #fff; }
+    .detect-badge.off { background: #9e9e9e; color: #fff; }
+    .detect-seen  { font-size: 13px; min-width: 100px; color: #333; }
+    #enrollForm   { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    #enrollName   { padding: 6px 8px; border-radius: 8px; border: 1px solid #5a7bd8; width: 110px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Pi Security Cam (Local)</h2>
+
+    <div class="row">
+      <div class="tabs">
+        <button id="tabLive" class="tab active" type="button">Live</button>
+        <button id="tabPlay" class="tab" type="button">Playback</button>
+      </div>
+
+      <div class="controls">
+        <button id="buzzBtn" type="button">Buzz: OFF</button>
+        <button id="testBuzz" type="button">Test Buzz</button>
+        <button id="calBtn" type="button">Calibrate</button>
+
+        <select id="rotSel">
+          <option value="0">Rotate 0&deg;</option>
+          <option value="90">Rotate 90&deg;</option>
+          <option value="180">Rotate 180&deg;</option>
+          <option value="270">Rotate 270&deg;</option>
+        </select>
+        <button id="applyRot" type="button">Apply rotation</button>
+        <button id="clearRoi" type="button">Clear area</button>
+                <button id="resetFocus" type="button">Reset focus</button>
+      </div>
+    </div>
+
+    <div id="focusRow" class="focus-row hidden">
+      <span class="focus-title">&#x1F50D; Manual Focus</span>
+      <span class="focus-side">Far (&#x221e;)</span>
+      <input id="lensSlider" type="range" min="0" max="15" step="0.1" style="width:min(400px,45vw);"/>
+      <span class="focus-side">Close (macro)</span>
+      <span id="lensVal" style="font-size:15px;font-weight:800;min-width:52px;text-align:center;background:#fff;padding:3px 8px;border-radius:8px;border:1px solid #f9a825;">auto</span>
+      <span id="lensDistHint" class="focus-dist-hint"></span>
+      <button id="focusAutoBtn" type="button" style="background:#fff8e1;border-color:#f9a825;font-weight:700;">&#x21BA; Auto AF</button>
+    </div>
+
+    <div id="detectPanel" class="detect-panel">
+      <span class="detect-title">&#x1F50E; Detect</span>
+      <span id="detectBadge" class="detect-badge off">OFF</span>
+      <span id="detectSeen" class="detect-seen">&#x23F3; starting&hellip;</span>
+      <form id="enrollForm" onsubmit="return enrollFace(event)">
+        <input id="enrollName"  type="text" placeholder="Name (Ron / Trisha)" maxlength="32"/>
+        <input id="enrollPhoto" type="file" accept="image/*" style="font-size:12px;max-width:170px"/>
+        <button type="submit" style="padding:6px 10px;border-radius:8px;border:1px solid #5a7bd8;background:#f0f4ff;font-weight:700;">&#x270F; Enroll face</button>
+      </form>
+    </div>
+
+    <div id="top" class="top ok">
+      <div id="banner">No motion</div>
+
+      <div class="controls">
+        <div class="slider">
+          <label for="thr">Sensitivity</label>
+          <input id="thr" type="range" min="10" max="35" step="1"/>
+          <span id="thrVal"></span>
+        </div>
+        <div class="slider">
+          <label for="minpx">Motion size</label>
+          <input id="minpx" type="range" min="200" max="8000" step="50"/>
+          <span id="minpxVal"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live -->
+    <div id="liveWrap" class="videoWrap">
+      <img id="cam" src="/stream.mjpg" alt="stream"/>
+      <div id="roiBox" class="roi"></div>
+            <div id="focusBox" class="focusTarget"></div>
+            <canvas id="detectCanvas"></canvas>
+    </div>
+
+    <!-- Playback -->
+    <div id="playWrap" class="hidden">
+      <div class="controls" style="margin: 8px 0;">
+        <div class="slider" style="flex:1; min-width: 260px;">
+          <label for="dvr">Time</label>
+          <input id="dvr" type="range" min="0" max="1800" step="1" style="width: min(900px, 70vw);" />
+          <span id="dvrLabel"></span>
+        </div>
+        <button id="jumpNow" type="button">Now</button>
+      </div>
+      <video id="player" controls preload="metadata"></video>
+      <div class="hint">Scrub slider: 0 = now, 30:00 = 30 minutes ago (when available). Live view is still best for "right now".</div>
+    </div>
+
+    <div class="hint">
+            Drag on Live video to select the monitored area (ROI). Tap or click the Live video to focus that area. Playback uses MP4 segments made from your rolling recording.
+      Recordings list: <code>/dvr/manifest</code>
+    </div>
+        <div id="focusStatus" class="hint focusStatus"></div>
+    <div id="meta" class="meta"></div>
+  </div>
+
+<script>
+let buzzEnabled = false;
+let prevMotion = false;
+let lastBuzzMs = 0;
+const BUZZ_COOLDOWN_MS = 900;
+
+let roiNorm = null;
+
+const tabLive = document.getElementById('tabLive');
+const tabPlay = document.getElementById('tabPlay');
+const liveWrap = document.getElementById('liveWrap');
+const playWrap = document.getElementById('playWrap');
+
+const wrap = liveWrap;
+const cam = document.getElementById('cam');
+const roiBox = document.getElementById('roiBox');
+const focusBox = document.getElementById('focusBox');
+const focusStatus = document.getElementById('focusStatus');
+const resetFocusBtn = document.getElementById('resetFocus');
+const lensSlider = document.getElementById('lensSlider');
+const lensVal = document.getElementById('lensVal');
+const focusRow = document.getElementById('focusRow');
+const focusAutoBtn = document.getElementById('focusAutoBtn');
+const thr = document.getElementById('thr');
+const thrVal = document.getElementById('thrVal');
+const minpx = document.getElementById('minpx');
+const minpxVal = document.getElementById('minpxVal');
+const rotSel = document.getElementById('rotSel');
+
+const dvr = document.getElementById('dvr');
+const dvrLabel = document.getElementById('dvrLabel');
+const player = document.getElementById('player');
+
+let dvrSegments = []; // oldest -> newest
+let dvrTotal = 0;
+let currentFile = null;
+
+function setSliderText() {
+  thrVal.textContent = String(thr.value);
+  minpxVal.textContent = String(minpx.value);
+}
+
+function unlockAudioTiny() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = 'square'; o.frequency.value = 120;
+    g.gain.value = 0.0001;
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.02);
+    setTimeout(() => ctx.close(), 120);
+  } catch(e){}
+}
+
+function buzz() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const o = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.type = 'square';
+  o.frequency.value = 150;
+  g.gain.value = 0.09;
+  o.connect(g); g.connect(ctx.destination);
+  o.start();
+  setTimeout(() => { o.stop(); ctx.close(); }, 220);
+}
+
+async function postJSON(url, body) {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!r.ok) {
+        throw new Error(data.error || ('Request failed: ' + r.status));
+    }
+    return data;
+}
+
+function setFocusStatus(text, state) {
+    focusStatus.textContent = text || '';
+    focusStatus.dataset.state = state || '';
+}
+
+function drawFocusTarget(norm) {
+    if (!norm) {
+        focusBox.style.display = 'none';
+        return;
+    }
+    const r = cam.getBoundingClientRect();
+    focusBox.style.left = (norm[0] * r.width) + 'px';
+    focusBox.style.top = (norm[1] * r.height) + 'px';
+    focusBox.style.animation = 'none';
+    void focusBox.offsetWidth;
+    focusBox.style.animation = '';
+    focusBox.style.display = 'block';
+}
+
+async function focusAt(xNorm, yNorm) {
+    drawFocusTarget([xNorm, yNorm]);
+    setFocusStatus('focusing lens...', 'pending');
+    try {
+        const result = await postJSON('/focus', { x_norm: xNorm, y_norm: yNorm });
+        if (result.status === 'focused' || result.status === 'adjusted') {
+            const lp = result.lens_after != null ? ' \u2014 pos ' + result.lens_after.toFixed(2) : '';
+            setFocusStatus('\u2713 focused' + lp, 'ok');
+            if (result.lens_after != null) setLensDisplay(result.lens_after);
+        } else {
+            setFocusStatus('tap focus failed \u2014 use Manual Focus slider above', 'error');
+        }
+    } catch (e) {
+        setFocusStatus(e.message || 'focus failed', 'error');
+    }
+}
+
+// Tabs
+function setMode(mode){
+  if(mode === 'live'){
+    tabLive.classList.add('active'); tabPlay.classList.remove('active');
+    liveWrap.classList.remove('hidden'); playWrap.classList.add('hidden');
+  } else {
+    tabPlay.classList.add('active'); tabLive.classList.remove('active');
+    playWrap.classList.remove('hidden'); liveWrap.classList.add('hidden');
+  }
+}
+tabLive.addEventListener('click', () => setMode('live'));
+tabPlay.addEventListener('click', () => setMode('playback'));
+
+// Buttons
+document.getElementById('buzzBtn').addEventListener('click', () => {
+  buzzEnabled = !buzzEnabled;
+  document.getElementById('buzzBtn').textContent = 'Buzz: ' + (buzzEnabled ? 'ON' : 'OFF');
+  unlockAudioTiny();
+});
+
+document.getElementById('testBuzz').addEventListener('click', () => {
+  unlockAudioTiny();
+  setTimeout(() => buzz(), 50);
+});
+
+document.getElementById('calBtn').addEventListener('click', async () => {
+  await postJSON('/calibrate', {});
+});
+
+document.getElementById('applyRot').addEventListener('click', async () => {
+  await postJSON('/set_rotation', { rotation: Number(rotSel.value) });
+});
+
+document.getElementById('clearRoi').addEventListener('click', async () => {
+  await postJSON('/set_roi', { roi_norm: null });
+  roiNorm = null;
+  roiBox.style.display = 'none';
+});
+
+resetFocusBtn.addEventListener('click', async () => {
+    try {
+        await postJSON('/focus/reset', {});
+        setFocusStatus('auto focus restored', 'ok');
+        lensVal.textContent = 'auto';
+        drawFocusTarget(null);
+    } catch (e) {
+        setFocusStatus(e.message || 'focus reset failed', 'error');
+    }
+});
+
+focusAutoBtn.addEventListener('click', async () => {
+    try {
+        await postJSON('/focus/reset', {});
+        setFocusStatus('auto focus restored', 'ok');
+        lensVal.textContent = 'auto';
+        drawFocusTarget(null);
+    } catch (e) {
+        setFocusStatus(e.message || 'focus reset failed', 'error');
+    }
+});
+
+function distHint(pos) {
+    const p = parseFloat(pos);
+    if (isNaN(p) || p <= 0) return '\u221e (far)';
+    const m = 1.0 / p;
+    if (m >= 3) return m.toFixed(0) + ' m';
+    if (m >= 0.5) return m.toFixed(1) + ' m';
+    return (m * 100).toFixed(0) + ' cm';
+}
+
+function setLensDisplay(pos) {
+    if (pos == null || isNaN(Number(pos))) {
+        lensVal.textContent = 'auto';
+        lensDistHint.textContent = '';
+        return;
+    }
+    const p = parseFloat(pos);
+    if (p >= parseFloat(lensSlider.min) && p <= parseFloat(lensSlider.max)) {
+        lensSlider.value = String(p);
+    }
+    lensVal.textContent = p.toFixed(1);
+    lensDistHint.textContent = '\u2248 ' + distHint(p);
+}
+
+const lensDistHint = document.getElementById('lensDistHint');
+
+let lensDebounce = null;
+lensSlider.addEventListener('input', () => {
+    const pos = parseFloat(lensSlider.value);
+    lensVal.textContent = pos.toFixed(1);
+    lensDistHint.textContent = '\u2248 ' + distHint(pos);
+    clearTimeout(lensDebounce);
+    lensDebounce = setTimeout(async () => {
+        try {
+            await postJSON('/focus/lens', { lens_pos: pos });
+            setFocusStatus('manual focus at ' + pos.toFixed(1) + ' (' + distHint(pos) + ')', 'ok');
+            drawFocusTarget(null);
+        } catch(e) {
+            setFocusStatus(e.message || 'focus failed', 'error');
+        }
+    }, 120);
+});
+
+// Sensitivity sliders
+thr.addEventListener('input', () => { setSliderText(); postJSON('/set_sensitivity', { pixel_diff_threshold: Number(thr.value), min_changed_pixels: Number(minpx.value) }); });
+minpx.addEventListener('input', () => { setSliderText(); postJSON('/set_sensitivity', { pixel_diff_threshold: Number(thr.value), min_changed_pixels: Number(minpx.value) }); });
+
+// ROI selection on live view
+function drawRoi(norm) {
+  if (!norm) { roiBox.style.display = 'none'; return; }
+  const r = wrap.getBoundingClientRect();
+  const [x1, y1, x2, y2] = norm;
+  roiBox.style.left = (x1 * r.width) + 'px';
+  roiBox.style.top  = (y1 * r.height) + 'px';
+  roiBox.style.width  = ((x2 - x1) * r.width) + 'px';
+  roiBox.style.height = ((y2 - y1) * r.height) + 'px';
+  roiBox.style.display = 'block';
+}
+
+let dragging = false;
+let pointerActive = false;
+let startX = 0, startY = 0;
+const TAP_DRAG_THRESHOLD = 0.01;
+function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+
+wrap.addEventListener('pointerdown', (e) => {
+  // only in live mode
+  if (liveWrap.classList.contains('hidden')) return;
+  const r = wrap.getBoundingClientRect();
+    pointerActive = true;
+    dragging = false;
+  startX = clamp01((e.clientX - r.left) / r.width);
+  startY = clamp01((e.clientY - r.top) / r.height);
+  wrap.setPointerCapture(e.pointerId);
+});
+
+wrap.addEventListener('pointermove', (e) => {
+    if (!pointerActive) return;
+  const r = wrap.getBoundingClientRect();
+  const x = clamp01((e.clientX - r.left) / r.width);
+  const y = clamp01((e.clientY - r.top) / r.height);
+    if (!dragging && (Math.abs(x - startX) >= TAP_DRAG_THRESHOLD || Math.abs(y - startY) >= TAP_DRAG_THRESHOLD)) {
+        dragging = true;
+        roiNorm = [startX, startY, startX, startY];
+    }
+    if (!dragging) return;
+  roiNorm = [Math.min(startX,x), Math.min(startY,y), Math.max(startX,x), Math.max(startY,y)];
+  drawRoi(roiNorm);
+});
+
+wrap.addEventListener('pointerup', async () => {
+    if (!pointerActive) return;
+    pointerActive = false;
+    if (!dragging) {
+        await focusAt(startX, startY);
+        return;
+    }
+    dragging = false;
+  const w = roiNorm[2] - roiNorm[0];
+  const h = roiNorm[3] - roiNorm[1];
+    if (w < 0.02 || h < 0.02) {
+        roiNorm = null;
+        roiBox.style.display = 'none';
+        await focusAt(startX, startY);
+        return;
+    }
+  await postJSON('/set_roi', { roi_norm: roiNorm });
+  await postJSON('/calibrate', {});
+});
+
+wrap.addEventListener('pointercancel', () => {
+    pointerActive = false;
+    dragging = false;
+});
+
+// DVR: load manifest, map slider to segments
+function fmtAgo(sec){
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function rebuildTimeline(segments){
+  // segments oldest->newest
+  dvrSegments = segments;
+  dvrTotal = segments.reduce((acc, x) => acc + (x.duration || 60), 0);
+  dvr.max = String(Math.max(0, dvrTotal));
+  // keep current value in range
+  if (Number(dvr.value) > dvrTotal) dvr.value = String(dvrTotal);
+}
+
+async function fetchManifest(){
+  try {
+    const r = await fetch('/dvr/manifest');
+    const j = await r.json();
+    rebuildTimeline(j.segments || []);
+  } catch(e) {}
+}
+
+function findSegmentForAgo(agoSec){
+  if (!dvrSegments.length) return null;
+
+  // Slider is "seconds ago": 0 = now (newest), dvrTotal = oldest
+  const targetFromOldest = Math.max(0, dvrTotal - agoSec);
+
+  // Build cumulative offsets
+  let offset = 0;
+  for (const seg of dvrSegments) {
+    const dur = seg.duration || 60;
+    if (targetFromOldest >= offset && targetFromOldest < offset + dur) {
+      return { file: seg.file, offsetSec: targetFromOldest - offset };
+    }
+    offset += dur;
+  }
+  // If exact end, clamp to last segment end
+  const last = dvrSegments[dvrSegments.length - 1];
+  return { file: last.file, offsetSec: (last.duration || 60) - 0.2 };
+}
+
+async function goToAgo(agoSec){
+  const hit = findSegmentForAgo(agoSec);
+  if (!hit) return;
+
+  const url = '/dvr/' + encodeURIComponent(hit.file);
+  if (currentFile !== hit.file) {
+    currentFile = hit.file;
+    player.src = url;
+    // seek after metadata loaded
+    player.onloadedmetadata = () => {
+      try { player.currentTime = Math.max(0, hit.offsetSec); } catch(e){}
+    };
+  } else {
+    try { player.currentTime = Math.max(0, hit.offsetSec); } catch(e){}
+  }
+}
+
+dvr.addEventListener('input', async () => {
+  const ago = Number(dvr.value);
+  dvrLabel.textContent = fmtAgo(ago) + " ago";
+});
+
+dvr.addEventListener('change', async () => {
+  const ago = Number(dvr.value);
+  await goToAgo(ago);
+});
+
+document.getElementById('jumpNow').addEventListener('click', async () => {
+  dvr.value = "0";
+  dvrLabel.textContent = "0:00 ago";
+  await goToAgo(0);
+});
+
+// Poll status + instant buzz
+async function pollStatus(){
+  try{
+    const r = await fetch('/status');
+    const s = await r.json();
+
+    const top = document.getElementById('top');
+    const b = document.getElementById('banner');
+    const m = document.getElementById('meta');
+
+    if(s.motion){
+      top.classList.remove('ok'); top.classList.add('alert');
+      b.textContent = 'MOTION DETECTED';
+    } else {
+      top.classList.remove('alert'); top.classList.add('ok');
+      b.textContent = 'No motion';
+    }
+
+    m.textContent =
+      'Events: ' + s.events +
+      ' | Last motion: ' + (s.last_motion_ts || '\u2014') +
+      ' | Changed: ' + s.changed_pixels +
+      ' | Min: ' + s.effective_min_changed +
+      ' | Instant: ' + s.suspect_threshold;
+
+    const now = Date.now();
+    if (buzzEnabled && s.motion && !prevMotion && (now - lastBuzzMs) > BUZZ_COOLDOWN_MS) {
+      buzz();
+      lastBuzzMs = now;
+    }
+    prevMotion = !!s.motion;
+  } catch(e){}
+}
+
+// Initial config
+async function loadConfig(){
+  const r = await fetch('/config');
+  const c = await r.json();
+  thr.value = c.pixel_diff_threshold;
+  minpx.value = c.min_changed_pixels;
+  rotSel.value = String(c.rotation);
+    resetFocusBtn.disabled = !c.focus_supported;
+  setSliderText();
+  roiNorm = c.roi_norm;
+  drawRoi(roiNorm);
+    if (!c.focus_supported) {
+        setFocusStatus('click focus unavailable on this camera', 'error');
+    } else if (c.lens_pos_max != null) {
+        lensSlider.min = String(c.lens_pos_min != null ? c.lens_pos_min : 0);
+        lensSlider.max = String(c.lens_pos_max != null ? c.lens_pos_max : 10);
+        lensSlider.step = '0.05';
+        focusRow.classList.remove('hidden');
+    }
+}
+loadConfig();
+fetchManifest();
+setInterval(fetchManifest, 2000);
+
+setInterval(pollStatus, 150);
+pollStatus();
+
+// ── Object detection overlay ────────────────────────────────────────────────
+const detectCanvas = document.getElementById('detectCanvas');
+const detectCtx    = detectCanvas.getContext('2d');
+const detectSeen   = document.getElementById('detectSeen');
+const detectBadge  = document.getElementById('detectBadge');
+
+const DET_COLORS = {
+  person: '#2196F3', dog: '#4CAF50', cat: '#9C27B0',
+  Ron: '#FF5722', Trisha: '#E91E63',
+};
+function detColor(label, cls) {
+  return DET_COLORS[label] || DET_COLORS[cls] || '#FF9800';
+}
+
+function drawDetections(dets) {
+  const w = detectCanvas.offsetWidth;
+  const h = detectCanvas.offsetHeight;
+  if (!w || !h) return;
+  detectCanvas.width  = w;
+  detectCanvas.height = h;
+  detectCtx.clearRect(0, 0, w, h);
+  detectCtx.font = 'bold 13px sans-serif';
+  for (const d of dets) {
+    const col = detColor(d.label, d.class);
+    const [x1, y1, x2, y2] = d.box;
+    const bx = x1*w, by = y1*h, bw = (x2-x1)*w, bh = (y2-y1)*h;
+    detectCtx.strokeStyle = col;
+    detectCtx.lineWidth   = 2.5;
+    detectCtx.strokeRect(bx, by, bw, bh);
+    const txt = d.label + ' ' + Math.round(d.conf * 100) + '%';
+    const tw  = detectCtx.measureText(txt).width + 10;
+    const ty  = by > 22 ? by - 20 : by + bh;
+    detectCtx.globalAlpha = 0.82;
+    detectCtx.fillStyle   = col;
+    detectCtx.fillRect(bx, ty, tw, 20);
+    detectCtx.globalAlpha = 1;
+    detectCtx.fillStyle   = '#fff';
+    detectCtx.fillText(txt, bx + 5, ty + 14);
+  }
+}
+
+function setDetectBadge(enabled, reason) {
+  if (enabled) {
+    detectBadge.textContent = 'ON';
+    detectBadge.className = 'detect-badge on';
+  } else {
+    detectBadge.textContent = 'OFF';
+    detectBadge.className = 'detect-badge off';
+  }
+}
+
+async function pollDetections() {
+  if (liveWrap.classList.contains('hidden')) return;
+  try {
+    const r = await fetch('/detections');
+    const d = await r.json();
+    const dets = d.detections || [];
+    drawDetections(dets);
+    setDetectBadge(d.enabled, d.reason);
+    if (!d.enabled) {
+            detectSeen.textContent = d.reason || 'detection unavailable';
+    } else if (dets.length) {
+      detectSeen.textContent = dets.map(x => x.label).join(', ');
+    } else {
+      detectSeen.textContent = 'nothing detected';
+      detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
+    }
+  } catch(e) {}
+}
+setInterval(pollDetections, 500);
+pollDetections();
+
+async function enrollFace(evt) {
+  evt.preventDefault();
+  const name  = document.getElementById('enrollName').value.trim();
+  const photo = document.getElementById('enrollPhoto').files[0];
+  if (!name || !photo) { alert('Name and photo are both required'); return false; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('photo', photo);
+  try {
+    const r = await fetch('/face/enroll', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.ok) {
+      alert(j.message);
+      document.getElementById('enrollName').value  = '';
+      document.getElementById('enrollPhoto').value = '';
+    } else {
+      alert('Error: ' + j.error);
+    }
+  } catch(e) { alert('Enrollment failed: ' + e); }
+  return false;
+}
+</script>
+</body>
+</html>

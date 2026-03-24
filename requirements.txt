@@ -1,0 +1,6 @@
+flask
+numpy
+opencv-python; platform_system == "Windows"
+pytest
+ultralytics
+waitress
