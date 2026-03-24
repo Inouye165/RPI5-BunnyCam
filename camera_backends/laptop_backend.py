@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import os
+import threading
+import time
+
+from .base import BackendUnavailableError, CameraBackend, normalize_rotation, sizes_for_rotation
+
+
+class LaptopCameraBackend(CameraBackend):
+    name = "laptop"
+    supports_recording = False
+    supports_rotation = True
+
+    def __init__(self, stream_output, camera_index: int = 0):
+        super().__init__(stream_output=stream_output)
+        self.camera_index = camera_index
+        self._capture = None
+        self._cv2 = None
+        self._frame_lock = threading.Lock()
+        self._latest_lores = None
+        self._stop_evt = threading.Event()
+        self._frame_ready = threading.Event()
+        self._thread = None
+
+    def _open_capture(self):
+        try:
+            import cv2
+        except ImportError as exc:
+            raise BackendUnavailableError(
+                "OpenCV is required for CAMERA_BACKEND=laptop. Install a build that provides cv2."
+            ) from exc
+
+        self._cv2 = cv2
+        if os.name == "nt" and hasattr(cv2, "CAP_DSHOW"):
+            capture = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        else:
+            capture = cv2.VideoCapture(self.camera_index)
+
+        if not capture or not capture.isOpened():
+            if capture is not None:
+                capture.release()
+            raise BackendUnavailableError(
+                f"Unable to open webcam index {self.camera_index} for CAMERA_BACKEND=laptop."
+            )
+
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._main_size[0])
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._main_size[1])
+        return capture
+
+    def _rotate_bgr(self, frame_bgr):
+        cv2 = self._cv2
+        if self.rotation == 90:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
+        if self.rotation == 180:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_180)
+        if self.rotation == 270:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame_bgr
+
+    def _capture_loop(self) -> None:
+        cv2 = self._cv2
+        assert cv2 is not None
+
+        while not self._stop_evt.is_set():
+            ok, frame_bgr = self._capture.read()
+            if not ok or frame_bgr is None:
+                time.sleep(0.05)
+                continue
+
+            frame_bgr = self._rotate_bgr(frame_bgr)
+            main_bgr = cv2.resize(frame_bgr, self._main_size)
+            lores_bgr = cv2.resize(frame_bgr, self._lores_size)
+            lores_rgb = cv2.cvtColor(lores_bgr, cv2.COLOR_BGR2RGB)
+
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                main_bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+            )
+            if ok:
+                self.stream_output.write(encoded.tobytes())
+
+            with self._frame_lock:
+                self._latest_lores = lores_rgb
+            self._frame_ready.set()
+
+    def start(self, rotation_deg: int = 0) -> None:
+        self.rotation = normalize_rotation(rotation_deg)
+        self._main_size, self._lores_size = sizes_for_rotation(self.rotation)
+        self.stop()
+
+        self._stop_evt.clear()
+        self._frame_ready.clear()
+        self._capture = self._open_capture()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="laptop-camera")
+        self._thread.start()
+
+        if not self._frame_ready.wait(timeout=3.0):
+            self.stop()
+            raise BackendUnavailableError(
+                "Laptop camera backend opened the webcam but no frames were received within 3 seconds."
+            )
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+        if self._capture is not None:
+            self._capture.release()
+        self._capture = None
+
+        with self._frame_lock:
+            self._latest_lores = None
+        self._frame_ready.clear()
+
+    def capture_lores_array(self):
+        with self._frame_lock:
+            if self._latest_lores is None:
+                return None
+            return self._latest_lores.copy()

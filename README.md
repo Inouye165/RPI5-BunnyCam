@@ -52,6 +52,16 @@ Typical local run:
 python3 sec_cam.py
 ```
 
+Local Windows development with a laptop webcam:
+
+```bash
+CAMERA_BACKEND=laptop python sec_cam.py
+```
+
+`sec_cam.py` also reads `.env.local` from the repo root if it exists. A local `.env.local` can pin `CAMERA_BACKEND=laptop` for Windows development without changing Raspberry Pi defaults.
+
+The laptop backend expects an OpenCV package that provides `cv2` in the active Python environment.
+
 Typical service management:
 
 ```bash
