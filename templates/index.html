@@ -364,6 +364,33 @@ const player = document.getElementById('player');
 let dvrSegments = []; // oldest -> newest
 let dvrTotal = 0;
 let currentFile = null;
+let currentMode = 'live';
+let pageVisible = document.visibilityState !== 'hidden';
+
+const POLL_POLICY = Object.freeze({
+  status: {
+    liveVisibleMs: 500,
+    liveHiddenMs: 1800,
+    playbackVisibleMs: 2200,
+    playbackHiddenMs: 5000,
+    maxBackoffMs: 15000,
+  },
+  detections: {
+    liveVisibleMs: 850,
+    liveHiddenMs: null,
+    maxBackoffMs: 12000,
+  },
+  dvrManifest: {
+    playbackVisibleMs: 12000,
+    playbackHiddenMs: 30000,
+    maxBackoffMs: 60000,
+  },
+  identities: {
+    visibleMs: 60000,
+    hiddenMs: null,
+    maxBackoffMs: 180000,
+  },
+});
 
 function setSliderText() {
   thrVal.textContent = String(thr.value);
@@ -405,6 +432,136 @@ async function postJSON(url, body) {
     return data;
 }
 
+async function fetchJSON(url, options = {}) {
+    const r = await fetch(url, options);
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!r.ok) {
+        throw new Error(data.error || ('Request failed: ' + r.status));
+    }
+    return data;
+}
+
+function getStatusPollDelay() {
+  if (currentMode === 'live') {
+    return pageVisible ? POLL_POLICY.status.liveVisibleMs : POLL_POLICY.status.liveHiddenMs;
+  }
+  return pageVisible ? POLL_POLICY.status.playbackVisibleMs : POLL_POLICY.status.playbackHiddenMs;
+}
+
+function getDetectionPollDelay() {
+  if (currentMode !== 'live') return null;
+  return pageVisible ? POLL_POLICY.detections.liveVisibleMs : POLL_POLICY.detections.liveHiddenMs;
+}
+
+function getManifestPollDelay() {
+  if (currentMode !== 'playback') return null;
+  return pageVisible ? POLL_POLICY.dvrManifest.playbackVisibleMs : POLL_POLICY.dvrManifest.playbackHiddenMs;
+}
+
+function getIdentityPollDelay() {
+  return pageVisible ? POLL_POLICY.identities.visibleMs : POLL_POLICY.identities.hiddenMs;
+}
+
+function createSingleFlightPoller(name, { run, getDelay, maxBackoffMs }) {
+  let timerId = null;
+  let inFlight = false;
+  let failureCount = 0;
+  let controller = null;
+  let stopped = false;
+
+  function clearTimer() {
+    if (timerId != null) {
+      clearTimeout(timerId);
+      timerId = null;
+    }
+  }
+
+  function computeDelay(baseDelay) {
+    if (baseDelay == null) return null;
+    if (failureCount <= 0) return baseDelay;
+    const retryBase = Math.max(baseDelay * 2, 1000);
+    return Math.min(maxBackoffMs, retryBase * (2 ** (failureCount - 1)));
+  }
+
+  function scheduleNext(overrideDelay) {
+    clearTimer();
+    if (stopped) return;
+    const baseDelay = getDelay();
+    if (baseDelay == null) {
+      if (controller) controller.abort();
+      return;
+    }
+    const delay = overrideDelay != null ? overrideDelay : computeDelay(baseDelay);
+    timerId = window.setTimeout(() => {
+      timerId = null;
+      tick();
+    }, Math.max(0, delay));
+  }
+
+  async function tick() {
+    clearTimer();
+    if (stopped || inFlight) return;
+    const baseDelay = getDelay();
+    if (baseDelay == null) {
+      if (controller) controller.abort();
+      return;
+    }
+
+    inFlight = true;
+    controller = new AbortController();
+    try {
+      await run({ signal: controller.signal });
+      failureCount = 0;
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        return;
+      }
+      failureCount += 1;
+      console.debug(`[poll:${name}] backing off after error`, error);
+    } finally {
+      inFlight = false;
+      controller = null;
+      scheduleNext();
+    }
+  }
+
+  function refresh(immediate = false) {
+    if (stopped) return;
+    const baseDelay = getDelay();
+    if (baseDelay == null) {
+      clearTimer();
+      if (controller) controller.abort();
+      return;
+    }
+    if (immediate && !inFlight) {
+      scheduleNext(0);
+      return;
+    }
+    if (!inFlight && timerId == null) {
+      scheduleNext();
+    }
+  }
+
+  function cancelIfInactive() {
+    if (getDelay() != null) return;
+    clearTimer();
+    if (controller) controller.abort();
+  }
+
+  function stop() {
+    stopped = true;
+    clearTimer();
+    if (controller) controller.abort();
+  }
+
+  return {
+    refresh,
+    cancelIfInactive,
+    stop,
+  };
+}
+
 function setFocusStatus(text, state) {
     focusStatus.textContent = text || '';
     focusStatus.dataset.state = state || '';
@@ -443,6 +600,7 @@ async function focusAt(xNorm, yNorm) {
 
 // Tabs
 function setMode(mode){
+  currentMode = mode;
   if(mode === 'live'){
     tabLive.classList.add('active'); tabPlay.classList.remove('active');
     liveWrap.classList.remove('hidden'); playWrap.classList.add('hidden');
@@ -450,6 +608,7 @@ function setMode(mode){
     tabPlay.classList.add('active'); tabLive.classList.remove('active');
     playWrap.classList.remove('hidden'); liveWrap.classList.add('hidden');
   }
+  syncPolling({ immediateFamilies: mode === 'playback' ? ['status', 'manifest'] : ['status', 'detections'] });
 }
 tabLive.addEventListener('click', () => setMode('live'));
 tabPlay.addEventListener('click', () => setMode('playback'));
@@ -640,12 +799,9 @@ function rebuildTimeline(segments){
   if (Number(dvr.value) > dvrTotal) dvr.value = String(dvrTotal);
 }
 
-async function fetchManifest(){
-  try {
-    const r = await fetch('/dvr/manifest');
-    const j = await r.json();
-    rebuildTimeline(j.segments || []);
-  } catch(e) {}
+async function fetchManifest({ signal } = {}){
+  const j = await fetchJSON('/dvr/manifest', { signal });
+  rebuildTimeline(j.segments || []);
 }
 
 function findSegmentForAgo(agoSec){
@@ -702,43 +858,39 @@ document.getElementById('jumpNow').addEventListener('click', async () => {
 });
 
 // Poll status + instant buzz
-async function pollStatus(){
-  try{
-    const r = await fetch('/status');
-    const s = await r.json();
+async function pollStatus({ signal } = {}){
+  const s = await fetchJSON('/status', { signal });
 
-    const top = document.getElementById('top');
-    const b = document.getElementById('banner');
-    const m = document.getElementById('meta');
+  const top = document.getElementById('top');
+  const b = document.getElementById('banner');
+  const m = document.getElementById('meta');
 
-    if(s.motion){
-      top.classList.remove('ok'); top.classList.add('alert');
-      b.textContent = 'MOTION DETECTED';
-    } else {
-      top.classList.remove('alert'); top.classList.add('ok');
-      b.textContent = 'No motion';
-    }
+  if(s.motion){
+    top.classList.remove('ok'); top.classList.add('alert');
+    b.textContent = 'MOTION DETECTED';
+  } else {
+    top.classList.remove('alert'); top.classList.add('ok');
+    b.textContent = 'No motion';
+  }
 
-    m.textContent =
-      'Events: ' + s.events +
-      ' | Last motion: ' + (s.last_motion_ts || '\u2014') +
-      ' | Changed: ' + s.changed_pixels +
-      ' | Min: ' + s.effective_min_changed +
-      ' | Instant: ' + s.suspect_threshold;
+  m.textContent =
+    'Events: ' + s.events +
+    ' | Last motion: ' + (s.last_motion_ts || '\u2014') +
+    ' | Changed: ' + s.changed_pixels +
+    ' | Min: ' + s.effective_min_changed +
+    ' | Instant: ' + s.suspect_threshold;
 
-    const now = Date.now();
-    if (buzzEnabled && s.motion && !prevMotion && (now - lastBuzzMs) > BUZZ_COOLDOWN_MS) {
-      buzz();
-      lastBuzzMs = now;
-    }
-    prevMotion = !!s.motion;
-  } catch(e){}
+  const now = Date.now();
+  if (buzzEnabled && s.motion && !prevMotion && (now - lastBuzzMs) > BUZZ_COOLDOWN_MS) {
+    buzz();
+    lastBuzzMs = now;
+  }
+  prevMotion = !!s.motion;
 }
 
 // Initial config
 async function loadConfig(){
-  const r = await fetch('/config');
-  const c = await r.json();
+  const c = await fetchJSON('/config');
   thr.value = c.pixel_diff_threshold;
   minpx.value = c.min_changed_pixels;
   rotSel.value = String(c.rotation);
@@ -756,12 +908,6 @@ async function loadConfig(){
         focusRow.classList.remove('hidden');
     }
 }
-loadConfig();
-fetchManifest();
-setInterval(fetchManifest, 2000);
-
-setInterval(pollStatus, 150);
-pollStatus();
 
 // ── Object detection overlay ────────────────────────────────────────────────
 const detectCanvas = document.getElementById('detectCanvas');
@@ -926,7 +1072,7 @@ function showEnrollModal(det, idx) {
         box: det.box,
       });
       close();
-      refreshIdentityPanel();
+      requestIdentityRefresh();
     } catch (e) {
       alert('Enrollment failed: ' + e.message);
       saveBtn.disabled = false;
@@ -949,50 +1095,45 @@ function setDetectBadge(enabled, reason) {
   }
 }
 
-async function pollDetections() {
+async function pollDetections({ signal } = {}) {
   if (liveWrap.classList.contains('hidden')) return;
-  try {
-    const r = await fetch('/detections');
-    const d = await r.json();
-    const dets = d.detections || [];
-    lastDetections = dets;
+  const d = await fetchJSON('/detections', { signal });
+  const dets = d.detections || [];
+  lastDetections = dets;
 
-    // Maintain selection across polls: match by class + overlapping box
-    if (selectedDet && selectedDetIdx >= 0) {
-      let found = -1;
-      for (let i = 0; i < dets.length; i++) {
-        if (dets[i].class === selectedDet.class) {
-          const [ax1, ay1, ax2, ay2] = selectedDet.box;
-          const [bx1, by1, bx2, by2] = dets[i].box;
-          const overlap = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1))
-                        * Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
-          const area = (ax2 - ax1) * (ay2 - ay1);
-          if (area > 0 && overlap / area > 0.3) { found = i; break; }
-        }
-      }
-      if (found >= 0) {
-        selectedDetIdx = found;
-        selectedDet = { ...dets[found], box: [...dets[found].box] };
-        selLabel.textContent = 'Selected: ' + dets[found].label + ' (' + Math.round(dets[found].conf * 100) + '%)';
-      } else {
-        clearSelection();
+  // Maintain selection across polls: match by class + overlapping box
+  if (selectedDet && selectedDetIdx >= 0) {
+    let found = -1;
+    for (let i = 0; i < dets.length; i++) {
+      if (dets[i].class === selectedDet.class) {
+        const [ax1, ay1, ax2, ay2] = selectedDet.box;
+        const [bx1, by1, bx2, by2] = dets[i].box;
+        const overlap = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1))
+                      * Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
+        const area = (ax2 - ax1) * (ay2 - ay1);
+        if (area > 0 && overlap / area > 0.3) { found = i; break; }
       }
     }
-
-    drawDetections(dets);
-    setDetectBadge(d.enabled, d.reason);
-    if (!d.enabled) {
-            detectSeen.textContent = d.reason || 'detection unavailable';
-    } else if (dets.length) {
-      detectSeen.textContent = dets.map(x => x.label).join(', ');
+    if (found >= 0) {
+      selectedDetIdx = found;
+      selectedDet = { ...dets[found], box: [...dets[found].box] };
+      selLabel.textContent = 'Selected: ' + dets[found].label + ' (' + Math.round(dets[found].conf * 100) + '%)';
     } else {
-      detectSeen.textContent = 'nothing detected';
-      detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
+      clearSelection();
     }
-  } catch(e) {}
+  }
+
+  drawDetections(dets);
+  setDetectBadge(d.enabled, d.reason);
+  if (!d.enabled) {
+          detectSeen.textContent = d.reason || 'detection unavailable';
+  } else if (dets.length) {
+    detectSeen.textContent = dets.map(x => x.label).join(', ');
+  } else {
+    detectSeen.textContent = 'nothing detected';
+    detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
+  }
 }
-setInterval(pollDetections, 500);
-pollDetections();
 
 async function enrollFace(evt) {
   evt.preventDefault();
@@ -1009,6 +1150,7 @@ async function enrollFace(evt) {
       alert(j.message);
       document.getElementById('enrollName').value  = '';
       document.getElementById('enrollPhoto').value = '';
+      requestIdentityRefresh();
     } else {
       alert('Error: ' + j.error);
     }
@@ -1020,46 +1162,43 @@ async function enrollFace(evt) {
 const identityPanel = document.getElementById('identityPanel');
 const identityListEl = document.getElementById('identityList');
 
-async function refreshIdentityPanel() {
-  try {
-    const r = await fetch('/identity/labels');
-    const d = await r.json();
-    const faces = d.faces || [];
-    const pets = d.pets || {};
-    const hasAny = faces.length > 0 || Object.keys(pets).length > 0;
+async function refreshIdentityPanel({ signal } = {}) {
+  const d = await fetchJSON('/identity/labels', { signal });
+  const faces = d.faces || [];
+  const pets = d.pets || {};
+  const hasAny = faces.length > 0 || Object.keys(pets).length > 0;
 
-    identityPanel.classList.toggle('hidden', !hasAny && !d.identity_labeling_enabled);
-    if (!hasAny) {
-      identityListEl.innerHTML = '<span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>';
-      return;
-    }
+  identityPanel.classList.toggle('hidden', !hasAny && !d.identity_labeling_enabled);
+  if (!hasAny) {
+    identityListEl.innerHTML = '<span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>';
+    return;
+  }
 
-    let html = '';
-    for (const name of faces) {
-      html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
-    }
-    for (const [cls, name] of Object.entries(pets)) {
-      const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
-      html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
-    }
-    identityListEl.innerHTML = html;
+  let html = '';
+  for (const name of faces) {
+    html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
+  }
+  for (const [cls, name] of Object.entries(pets)) {
+    const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
+    html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
+  }
+  identityListEl.innerHTML = html;
 
-    identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const cat = btn.dataset.cat;
-        const name = btn.dataset.name;
-        if (!confirm(`Remove "${name}"?`)) return;
-        try {
-          await fetch('/identity/label', {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, category: cat }),
-          });
-          refreshIdentityPanel();
-        } catch (e) { alert('Delete failed: ' + e.message); }
-      });
+  identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const cat = btn.dataset.cat;
+      const name = btn.dataset.name;
+      if (!confirm(`Remove "${name}"?`)) return;
+      try {
+        await fetchJSON('/identity/label', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, category: cat }),
+        });
+        requestIdentityRefresh();
+      } catch (e) { alert('Delete failed: ' + e.message); }
     });
-  } catch(e) {}
+  });
 }
 
 function esc(s) {
@@ -1068,8 +1207,66 @@ function esc(s) {
   return d.innerHTML;
 }
 
-refreshIdentityPanel();
-setInterval(refreshIdentityPanel, 5000);
+const pollers = {
+  status: createSingleFlightPoller('status', {
+    run: pollStatus,
+    getDelay: getStatusPollDelay,
+    maxBackoffMs: POLL_POLICY.status.maxBackoffMs,
+  }),
+  detections: createSingleFlightPoller('detections', {
+    run: pollDetections,
+    getDelay: getDetectionPollDelay,
+    maxBackoffMs: POLL_POLICY.detections.maxBackoffMs,
+  }),
+  manifest: createSingleFlightPoller('manifest', {
+    run: fetchManifest,
+    getDelay: getManifestPollDelay,
+    maxBackoffMs: POLL_POLICY.dvrManifest.maxBackoffMs,
+  }),
+  identities: createSingleFlightPoller('identities', {
+    run: refreshIdentityPanel,
+    getDelay: getIdentityPollDelay,
+    maxBackoffMs: POLL_POLICY.identities.maxBackoffMs,
+  }),
+};
+
+function syncPolling({ immediateFamilies = [] } = {}) {
+  Object.entries(pollers).forEach(([name, poller]) => {
+    if (immediateFamilies.includes(name)) {
+      poller.refresh(true);
+      return;
+    }
+    poller.cancelIfInactive();
+    poller.refresh(false);
+  });
+}
+
+function requestIdentityRefresh() {
+  pollers.identities.refresh(true);
+}
+
+document.addEventListener('visibilitychange', () => {
+  pageVisible = document.visibilityState !== 'hidden';
+  const immediateFamilies = [];
+  if (pageVisible) {
+    immediateFamilies.push('status', 'identities');
+    if (currentMode === 'live') immediateFamilies.push('detections');
+    if (currentMode === 'playback') immediateFamilies.push('manifest');
+  }
+  syncPolling({ immediateFamilies });
+});
+
+window.addEventListener('beforeunload', () => {
+  Object.values(pollers).forEach((poller) => poller.stop());
+});
+
+loadConfig().then(() => {
+  requestIdentityRefresh();
+  syncPolling({ immediateFamilies: ['status', 'detections'] });
+}).catch((error) => {
+  console.debug('[config] initial load failed', error);
+  syncPolling({ immediateFamilies: ['status', 'detections'] });
+});
 </script>
 </body>
 </html>
