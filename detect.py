@@ -2,12 +2,20 @@
 
 Detects:   person, dog, cat  (YOLOv8n trained on COCO-80)
 Identifies persons as known names (Ron, Trisha, …) via face_recognition.
+Pets (cat / dog) can be named via manual labels stored in labels.json.
 
 Face enrollment
 ───────────────
 Option 1 – Drop a JPEG into ./faces/  (e.g.  faces/Ron.jpg)  and restart the
            app.  On startup the file is auto-encoded and saved as  Ron.npy.
 Option 2 – Use the web UI: enter a name, pick a photo, click "Enroll face".
+Option 3 – Click a person bounding box in the live view and type a name
+           (requires face_recognition; captures from the live frame).
+
+Pet naming
+──────────
+Click a cat or dog bounding box in the live view and type a name.
+Pet names are stored in faces/labels.json and need no extra dependencies.
 
 Notes
 ─────
@@ -18,6 +26,7 @@ Notes
 """
 
 import io
+import json
 import os
 import time
 import threading
@@ -37,13 +46,16 @@ FACE_DIST    = 0.50  # face_recognition distance threshold (lower = stricter)
 WATCH_CLASSES: dict[int, str] = {0: "person", 15: "cat", 16: "dog"}
 
 FACES_DIR = os.path.join(os.path.dirname(__file__), "faces")
+LABELS_FILE = os.path.join(FACES_DIR, "labels.json")
 
 # ── module-level state ────────────────────────────────────────────────────────
 _lock        = threading.Lock()
 _models: dict = {"yolo": None, "fr": None}
 _known_names: list[str]       = []
 _known_encs:  list[np.ndarray] = []
+_pet_labels:  dict[str, str]  = {}   # class → pet name  ("cat" → "Mochi")
 _latest: dict = {"detections": [], "ts": 0.0, "model": "none"}
+_latest_frame: np.ndarray | None = None
 _status: dict = {
     "detection_enabled": False,
     "detection_reason": "YOLO model not loaded yet",
@@ -129,6 +141,29 @@ def _load_faces() -> None:
     logger.info("detect: loaded %d face(s): %s", len(names), names)
 
 
+# ── pet label persistence ─────────────────────────────────────────────────────
+
+def _load_pet_labels() -> None:
+    """Load pet labels from faces/labels.json."""
+    global _pet_labels
+    if os.path.isfile(LABELS_FILE):
+        try:
+            with open(LABELS_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                _pet_labels = data
+                logger.info("detect: loaded pet labels %s", _pet_labels)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("detect: could not load labels.json — %s", exc)
+
+
+def _save_pet_labels() -> None:
+    """Persist pet labels to faces/labels.json."""
+    os.makedirs(FACES_DIR, exist_ok=True)
+    with open(LABELS_FILE, "w", encoding="utf-8") as fh:
+        json.dump(_pet_labels, fh, indent=2)
+
+
 # ── per-frame inference ───────────────────────────────────────────────────────
 
 def _run(frame_rgb: np.ndarray) -> list[dict]:
@@ -161,6 +196,12 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     except (RuntimeError, ValueError, OSError) as exc:
         logger.debug("detect: YOLO error — %s", exc)
         return dets
+
+    # ── pet labels ────────────────────────────────────────────────────────────────────
+    for d in dets:
+        pet_name = _pet_labels.get(d["class"])
+        if pet_name:
+            d["label"] = pet_name
 
     # ── face recognition ──────────────────────────────────────────────────────────────
     fr = _models["fr"]
@@ -213,13 +254,16 @@ def _worker(get_frame_fn: Callable) -> None:
     # happens in the background; detections appear once loading is done).
     _load_yolo()
     _load_faces()
+    _load_pet_labels()
 
+    global _latest_frame
     interval = 1.0 / DETECT_FPS
     while not _stop.is_set():
         t0 = time.time()
         try:
             frame = get_frame_fn()
             if frame is not None:
+                _latest_frame = frame
                 dets = _run(frame)
                 with _lock:
                     _latest["detections"] = dets
@@ -253,13 +297,16 @@ def get_detections() -> dict:
 
 
 def get_status() -> dict:
-    """Return detection and face-recognition readiness for the app status APIs."""
+    """Return detection, face-recognition, and identity-labeling readiness."""
     with _lock:
         return {
             "detection_enabled": bool(_status["detection_enabled"]),
             "detection_reason": _status["detection_reason"],
             "face_recognition_enabled": bool(_status["face_recognition_enabled"]),
             "face_recognition_reason": _status["face_recognition_reason"],
+            "identity_labeling_enabled": True,
+            "pet_labels": dict(_pet_labels),
+            "known_faces": list(_known_names),
             "model": _latest.get("model", "none"),
         }
 
@@ -302,5 +349,97 @@ def enroll_face(name: str, image_bytes: bytes) -> tuple[bool, str]:
                 _known_encs.append(encs[0])
 
         return True, f"Enrolled '{safe}'"
+    except (OSError, ValueError, RuntimeError) as exc:
+        return False, str(exc)
+
+
+def set_pet_label(cls: str, name: str) -> tuple[bool, str]:
+    """Assign a friendly name to a pet class (cat / dog).  Thread-safe."""
+    cls = cls.strip().lower()
+    if cls not in ("cat", "dog"):
+        return False, f"unsupported class '{cls}'"
+    safe = name.strip()[:32]
+    if not safe:
+        return False, "name required"
+    _pet_labels[cls] = safe
+    _save_pet_labels()
+    return True, f"Labeled {cls} as '{safe}'"
+
+
+def remove_pet_label(cls: str) -> tuple[bool, str]:
+    """Remove a pet label.  Thread-safe."""
+    cls = cls.strip().lower()
+    if cls in _pet_labels:
+        del _pet_labels[cls]
+        _save_pet_labels()
+        return True, f"Removed label for '{cls}'"
+    return False, f"no label for '{cls}'"
+
+
+def get_pet_labels() -> dict[str, str]:
+    """Return current pet labels."""
+    return dict(_pet_labels)
+
+
+def remove_face(name: str) -> tuple[bool, str]:
+    """Remove an enrolled face by name."""
+    safe = name.strip()
+    with _lock:
+        if safe not in _known_names:
+            return False, f"'{safe}' not enrolled"
+        idx = _known_names.index(safe)
+        _known_names.pop(idx)
+        _known_encs.pop(idx)
+    npy = os.path.join(FACES_DIR, safe + ".npy")
+    if os.path.isfile(npy):
+        os.remove(npy)
+    return True, f"Removed '{safe}'"
+
+
+def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
+    """Enroll a face from the latest live frame using a bounding box crop."""
+    fr = _models["fr"]
+    if fr is None:
+        return False, ("face_recognition not installed "
+                       "— cannot enroll person from live frame")
+
+    frame = _latest_frame
+    if frame is None:
+        return False, "no live frame available yet"
+
+    safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()[:32]
+    if not safe:
+        return False, "invalid name"
+
+    try:
+        h, w = frame.shape[:2]
+        x1 = max(0, int(box[0] * w))
+        y1 = max(0, int(box[1] * h))
+        x2 = min(w, int(box[2] * w))
+        y2 = min(h, int(box[3] * h))
+        if x2 <= x1 or y2 <= y1:
+            return False, "invalid bounding box"
+
+        crop = frame[y1:y2, x1:x2]
+        encs = fr.face_encodings(crop)
+        if not encs:
+            encs = fr.face_encodings(
+                frame[max(0, y1 - 20):min(h, y2 + 20),
+                      max(0, x1 - 20):min(w, x2 + 20)])
+        if not encs:
+            return False, ("no face detected in selected area "
+                           "— try when the face is clearly visible")
+
+        os.makedirs(FACES_DIR, exist_ok=True)
+        np.save(os.path.join(FACES_DIR, safe + ".npy"), encs[0])
+
+        with _lock:
+            if safe in _known_names:
+                _known_encs[_known_names.index(safe)] = encs[0]
+            else:
+                _known_names.append(safe)
+                _known_encs.append(encs[0])
+
+        return True, f"Enrolled '{safe}' from live frame"
     except (OSError, ValueError, RuntimeError) as exc:
         return False, str(exc)

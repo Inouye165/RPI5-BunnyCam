@@ -1,3 +1,4 @@
+face_recognition; platform_system == "Windows"
 flask
 numpy
 opencv-python; platform_system == "Windows"

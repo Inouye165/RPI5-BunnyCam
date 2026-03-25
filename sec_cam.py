@@ -864,6 +864,7 @@ def _detection_status_payload():
             "detection_model": "none",
             "face_recognition_enabled": False,
             "face_recognition_reason": "detect module unavailable",
+            "identity_labeling_enabled": False,
         }
 
     detect_status = _detect.get_status()
@@ -873,6 +874,7 @@ def _detection_status_payload():
         "detection_model": detect_status.get("model", "none"),
         "face_recognition_enabled": bool(detect_status.get("face_recognition_enabled", False)),
         "face_recognition_reason": detect_status.get("face_recognition_reason"),
+        "identity_labeling_enabled": bool(detect_status.get("identity_labeling_enabled", False)),
     }
 
 
@@ -1110,6 +1112,68 @@ def face_enroll():
     if not photo:
         return jsonify({"ok": False, "error": "photo required"}), 400
     ok, msg = _detect.enroll_face(name, photo.read())
+    if ok:
+        return jsonify({"ok": True, "message": msg})
+    return jsonify({"ok": False, "error": msg}), 400
+
+
+@app.post("/identity/enroll")
+def identity_enroll():
+    """Enroll a person or pet from a live bounding box click."""
+    if _detect is None:
+        return jsonify({"ok": False, "error": "detection not available"}), 400
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    category = str(data.get("category", "")).strip().lower()
+    box = data.get("box")
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    if not box or not isinstance(box, list) or len(box) != 4:
+        return jsonify({"ok": False, "error": "box required (4 floats)"}), 400
+
+    if category in ("cat", "dog"):
+        ok, msg = _detect.set_pet_label(category, name)
+    elif category == "person":
+        ok, msg = _detect.snapshot_enroll(name, box)
+    else:
+        return jsonify({"ok": False,
+                        "error": f"unsupported category '{category}'"}), 400
+
+    if ok:
+        return jsonify({"ok": True, "message": msg})
+    return jsonify({"ok": False, "error": msg}), 400
+
+
+@app.get("/identity/labels")
+def identity_labels():
+    """List all identity labels (faces + pet labels)."""
+    if _detect is None:
+        return jsonify({"faces": [], "pets": {},
+                        "identity_labeling_enabled": False})
+    status = _detect.get_status()
+    return jsonify({
+        "faces": status.get("known_faces", []),
+        "pets": status.get("pet_labels", {}),
+        "identity_labeling_enabled": True,
+    })
+
+
+@app.delete("/identity/label")
+def identity_label_delete():
+    """Remove an enrolled face or pet label."""
+    if _detect is None:
+        return jsonify({"ok": False, "error": "detection not available"}), 400
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    category = str(data.get("category", "")).strip().lower()
+    if not name and not category:
+        return jsonify({"ok": False, "error": "name or category required"}), 400
+
+    if category in ("cat", "dog"):
+        ok, msg = _detect.remove_pet_label(category)
+    else:
+        ok, msg = _detect.remove_face(name)
+
     if ok:
         return jsonify({"ok": True, "message": msg})
     return jsonify({"ok": False, "error": msg}), 400
