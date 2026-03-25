@@ -58,6 +58,28 @@ Local Windows development with a laptop webcam:
 CAMERA_BACKEND=laptop python sec_cam.py
 ```
 
+Windows convenience launchers are included for local development:
+
+```powershell
+.\start_local.ps1
+```
+
+```powershell
+.\bin\start_local.ps1
+```
+
+```bat
+bin\start_local.cmd
+```
+
+Both default to `CAMERA_BACKEND=laptop` and `BUNNYCAM_PORT=8001`, while still allowing either environment variable to be overridden.
+
+VS Code workspace helpers are also included:
+
+- task: `BunnyCam: Run Local`
+- task: `BunnyCam: Install Requirements`
+- debug profile: `BunnyCam: Debug Local`
+
 `sec_cam.py` also reads `.env.local` from the repo root if it exists. A local `.env.local` can pin `CAMERA_BACKEND=laptop` for Windows development without changing Raspberry Pi defaults.
 
 The laptop backend expects an OpenCV package that provides `cv2` in the active Python environment.
@@ -70,10 +92,16 @@ sudo systemctl status sec-cam.service
 journalctl -u sec-cam.service -b --no-pager | tail -100
 ```
 
-Browser address:
+Browser address on Raspberry Pi default startup:
 
 ```text
 http://localhost:8000/
+```
+
+Browser address for the Windows local launcher and VS Code task/debug profile:
+
+```text
+http://localhost:8001/
 ```
 
 For remote access, substitute the Pi address with the appropriate LAN host or IP.
