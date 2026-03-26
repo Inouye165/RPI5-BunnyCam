@@ -189,6 +189,27 @@ def test_server_port_uses_env_override(monkeypatch):
     assert module.get_server_port() == 8001
 
 
+def test_server_host_defaults_to_localhost_for_laptop_backend(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.delenv("BUNNYCAM_HOST", raising=False)
+
+    assert module.get_server_host() == "127.0.0.1"
+
+
+def test_server_host_defaults_to_all_interfaces_for_pi_backend(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="pi")
+    monkeypatch.delenv("BUNNYCAM_HOST", raising=False)
+
+    assert module.get_server_host() == "0.0.0.0"
+
+
+def test_server_host_uses_env_override(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setenv("BUNNYCAM_HOST", "0.0.0.0")
+
+    assert module.get_server_host() == "0.0.0.0"
+
+
 # ── Identity / live-box enrollment tests ─────────────────────────────────────
 
 def _make_identity_detect_ns(**overrides):

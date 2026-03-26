@@ -21,5 +21,9 @@ if (-not $env:BUNNYCAM_PORT) {
     $env:BUNNYCAM_PORT = '8001'
 }
 
+if (-not $env:BUNNYCAM_HOST) {
+    $env:BUNNYCAM_HOST = '127.0.0.1'
+}
+
 Write-Host "Starting BunnyCam on http://127.0.0.1:$($env:BUNNYCAM_PORT) using backend '$($env:CAMERA_BACKEND)'"
 & $pythonExe (Join-Path $repoRoot 'sec_cam.py')

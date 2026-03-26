@@ -210,6 +210,23 @@ def get_server_port() -> int:
         return 8000
 
 
+def get_server_host() -> str:
+    host = os.getenv("BUNNYCAM_HOST")
+    if host:
+        return host
+
+    raw_backend = os.getenv("CAMERA_BACKEND")
+    try:
+        selected_backend = normalize_camera_backend_name(raw_backend)
+    except ValueError:
+        selected_backend = (raw_backend or "").strip().lower()
+
+    if selected_backend == "laptop":
+        return "127.0.0.1"
+
+    return "0.0.0.0"
+
+
 def create_app(camera_backend_override=None, testing: bool = False):
     if camera_backend_override is not None:
         _configure_camera_backend(camera_backend_override)
@@ -1225,14 +1242,15 @@ def main():
 
     initialize_runtime()
     port = get_server_port()
+    host = get_server_host()
 
     if waitress_serve is not None:
-        logger.info("Starting on http://0.0.0.0:%d (waitress)", port)
-        waitress_serve(app, host="0.0.0.0", port=port, threads=8,
+        logger.info("Starting on http://%s:%d (waitress)", host, port)
+        waitress_serve(app, host=host, port=port, threads=8,
                        channel_timeout=60, cleanup_interval=10)
     else:
         logger.warning("waitress not available, falling back to Flask dev server")
-        app.run(host="0.0.0.0", port=port, threaded=True)
+        app.run(host=host, port=port, threaded=True)
 
 
 if __name__ == "__main__":
