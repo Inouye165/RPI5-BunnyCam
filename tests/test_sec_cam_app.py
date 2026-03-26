@@ -512,3 +512,51 @@ def test_identity_enroll_not_available_returns_clear_message(monkeypatch):
     payload = response.get_json()
     assert payload["ok"] is False
     assert "not available" in payload["error"]
+
+
+def test_identity_enroll_returns_json_for_unexpected_snapshot_error(monkeypatch):
+    """POST /identity/enroll should return JSON when live enrollment crashes."""
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    def boom(_name, _box):
+        raise TypeError("bad crop")
+
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        snapshot_enroll=boom,
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/identity/enroll", json={
+        "name": "Ron", "category": "person", "box": [0.1, 0.2, 0.5, 0.8],
+    })
+
+    assert response.status_code == 500
+    assert response.is_json is True
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error"] == "live enrollment failed: bad crop"
+
+
+def test_identity_enroll_returns_json_for_unexpected_pet_label_error(monkeypatch):
+    """POST /identity/enroll should return JSON when pet labeling crashes."""
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    def boom(_category, _name):
+        raise RuntimeError("pet label store offline")
+
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        set_pet_label=boom,
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/identity/enroll", json={
+        "name": "Mochi", "category": "cat", "box": [0.1, 0.2, 0.5, 0.8],
+    })
+
+    assert response.status_code == 500
+    assert response.is_json is True
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error"] == "live enrollment failed: pet label store offline"

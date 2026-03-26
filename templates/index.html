@@ -425,9 +425,9 @@ function buzz() {
 async function postJSON(url, body) {
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const text = await r.text();
-    const data = text ? JSON.parse(text) : {};
+    const data = parseResponseBody(text, r.headers.get('content-type'));
     if (!r.ok) {
-        throw new Error(data.error || ('Request failed: ' + r.status));
+        throw new Error(extractErrorMessage(data, text, r.status));
     }
     return data;
 }
@@ -435,11 +435,46 @@ async function postJSON(url, body) {
 async function fetchJSON(url, options = {}) {
     const r = await fetch(url, options);
     const text = await r.text();
-    const data = text ? JSON.parse(text) : {};
+    const data = parseResponseBody(text, r.headers.get('content-type'));
     if (!r.ok) {
-        throw new Error(data.error || ('Request failed: ' + r.status));
+        throw new Error(extractErrorMessage(data, text, r.status));
     }
     return data;
+}
+
+function parseResponseBody(text, contentType) {
+  if (!text) return {};
+  const isJson = (contentType || '').toLowerCase().includes('application/json');
+  if (isJson) {
+    return JSON.parse(text);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return { rawText: text };
+  }
+}
+
+function extractErrorMessage(data, text, status) {
+  if (data && typeof data.error === 'string' && data.error.trim()) {
+    return data.error;
+  }
+  if (data && typeof data.message === 'string' && data.message.trim()) {
+    return data.message;
+  }
+  if (data && typeof data.rawText === 'string') {
+    const firstLine = data.rawText.trim().split(/\r?\n/, 1)[0];
+    if (firstLine) {
+      return firstLine.length > 180 ? firstLine.slice(0, 177) + '...' : firstLine;
+    }
+  }
+  if (text && text.trim()) {
+    const firstLine = text.trim().split(/\r?\n/, 1)[0];
+    if (firstLine) {
+      return firstLine.length > 180 ? firstLine.slice(0, 177) + '...' : firstLine;
+    }
+  }
+  return 'Request failed: ' + status;
 }
 
 function getStatusPollDelay() {
@@ -1038,7 +1073,7 @@ function showEnrollModal(det, idx) {
       <h3>Name this ${cls}</h3>
       <div class="det-preview">${det.label} &mdash; ${Math.round(det.conf * 100)}% confidence</div>
       <label for="enrollModalName">Name</label>
-      <input id="enrollModalName" type="text" maxlength="32" placeholder="${isPet ? 'e.g. Mochi' : 'e.g. Ron'}" autofocus/>
+      <input id="enrollModalName" type="text" maxlength="32" placeholder="${isPet ? 'e.g. Mochi' : 'e.g. Ron'}"/>
       ${!isPet ? '<div style="font-size:11px;color:#888;margin-top:4px;">Requires face_recognition. The current live frame will be used.</div>' : ''}
       <div class="modal-actions">
         <button class="btn-cancel" type="button">Cancel</button>
