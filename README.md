@@ -151,12 +151,18 @@ Candidate collection artifacts:
 - `data/candidates/metadata/YYYY/MM/DD/`: per-candidate JSON metadata
 - `data/candidates/review/approved_manifest.json`: training-ready approved index
 - `data/candidates/review/rejected_manifest.json`: rejected index for exclusion
+- `data/exports/reviewed/YYYYMMDD_HHMMSS/`: versioned reviewed export bundles
 - `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
 - `GET /review`: lightweight review and labeling queue UI
+- `GET /api/version`: app version/build metadata for UI display and diagnostics
 
 Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
 
 The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
+
+The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
+
+Reviewed export is conservative by design: only `approved` items export. Rejected items are excluded, and labeled-but-not-approved items are not exported. Each export bundle includes copied images, copied source metadata JSON, and a training-ready `manifest.json` under `data/exports/reviewed/...`.
 
 VS Code workspace helpers are also included:
 

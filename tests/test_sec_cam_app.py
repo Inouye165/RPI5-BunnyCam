@@ -129,6 +129,12 @@ def test_detections_route_reports_disabled_reason(monkeypatch):
 
 def test_status_route_includes_detection_state(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
     monkeypatch.setattr(module, "_detect", types.SimpleNamespace(
         get_status=lambda: {
             "detection_enabled": True,
@@ -151,6 +157,26 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["detection_model"] == "yolov8n"
     assert payload["face_recognition_enabled"] is False
     assert payload["candidate_collection"]["saved_total"] == 2
+    assert payload["app_version"]["display"] == "v0.3.0 (main@abc1234)"
+
+
+def test_version_endpoint(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "feat/phase-3-version-and-reviewed-export",
+        "commit": "bc86c20",
+        "display": "v0.3.0 (feat/phase-3-version-and-reviewed-export@bc86c20)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/version")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["version"] == "0.3.0"
+    assert payload["commit"] == "bc86c20"
 
 
 def test_candidate_collection_status_route(monkeypatch):
@@ -203,6 +229,12 @@ def _make_review_item(**overrides):
 
 def test_review_page_route(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
     app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
     client = app.test_client()
 
@@ -210,6 +242,24 @@ def test_review_page_route(monkeypatch):
 
     assert response.status_code == 200
     assert b"Candidate Review Queue" in response.data
+    assert b"v0.3.0 (main@abc1234)" in response.data
+
+
+def test_main_page_renders_version_badge(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"v0.3.0 (main@abc1234)" in response.data
 
 
 def test_review_candidates_list_route(monkeypatch):
@@ -299,6 +349,30 @@ def test_review_candidate_label_update_route(monkeypatch):
     payload = response.get_json()
     assert payload["candidate"]["identity_label"] == "Dobby"
     assert calls == [("candidate-3", {"identity_label": "Dobby", "corrected_class_name": "dog"})]
+
+
+def test_review_export_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_review_exporter", types.SimpleNamespace(
+        export_reviewed_dataset=lambda **_kwargs: {
+            "export_name": "20260326_063500",
+            "export_path": "c:/Users/inouy/RPI5-BunnyCam/data/exports/reviewed/20260326_063500",
+            "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/exports/reviewed/20260326_063500/manifest.json",
+            "exported_count": 3,
+            "skipped_count": 1,
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/export")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["export_name"] == "20260326_063500"
+    assert payload["exported_count"] == 3
+    assert payload["manifest_path"].endswith("manifest.json")
 
 
 def test_detections_when_detect_module_unavailable(monkeypatch):
