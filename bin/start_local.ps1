@@ -2,12 +2,18 @@ param(
     [switch]$SkipInstall,
     [int]$StartupTimeoutSec = 60,
     [int]$PostStartMonitorSec = 15,
-    [string]$ResultsFile = 'STARTUP_RESULTS.md'
+    [string]$ResultsFile = 'STARTUP_RESULTS.md',
+    [string]$Actor = 'manual',
+    [string]$Issue,
+    [string]$Fix,
+    [string]$Note
 )
 
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$commonScript = Join-Path $PSScriptRoot 'startup_common.ps1'
+. $commonScript
 $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $requirementsFile = Join-Path $repoRoot 'requirements.txt'
 $entryScript = Join-Path $repoRoot 'sec_cam.py'
@@ -15,112 +21,9 @@ $resultsPath = Join-Path $repoRoot $ResultsFile
 $runtimeLogDir = Join-Path $repoRoot 'logs'
 $stdoutLog = Join-Path $runtimeLogDir 'bunnycam-start.stdout.log'
 $stderrLog = Join-Path $runtimeLogDir 'bunnycam-start.stderr.log'
+$runtimeStatePath = Join-Path $runtimeLogDir 'bunnycam-runtime.json'
+$managedComponents = @('BunnyCam Python web process')
 
-function Resolve-PythonExe {
-    param([string]$VirtualEnvPython)
-
-    if (Test-Path $VirtualEnvPython) {
-        return $VirtualEnvPython
-    }
-
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) {
-        throw 'Python was not found. Create .venv or add python to PATH.'
-    }
-
-    return $pythonCommand.Source
-}
-
-function Test-BunnyCamStatus {
-    param(
-        [string]$Url,
-        [int]$TimeoutSeconds = 3
-    )
-
-    try {
-        $response = Invoke-RestMethod -Uri $Url -TimeoutSec $TimeoutSeconds
-        return @{ Ok = $true; Payload = $response; Error = $null }
-    } catch {
-        return @{ Ok = $false; Payload = $null; Error = $_.Exception.Message }
-    }
-}
-
-function Get-LogTail {
-    param(
-        [string]$Path,
-        [int]$Lines = 20
-    )
-
-    if (-not (Test-Path $Path)) {
-        return ''
-    }
-
-    $content = Get-Content -Path $Path -Tail $Lines -ErrorAction SilentlyContinue
-    if (-not $content) {
-        return ''
-    }
-
-    return ($content -join "`n")
-}
-
-function Ensure-ResultsFile {
-    param([string]$Path)
-
-    if (Test-Path $Path) {
-        return
-    }
-
-    $initialContent = @(
-        '# BunnyCam Startup Results',
-        '',
-        'This file is updated by `start_local.ps1` during each startup attempt.',
-        '',
-        'Each entry records:',
-        '- local timestamp',
-        '- hostname',
-        '- backend, host, and port',
-        '- whether startup succeeded or failed',
-        '- PID or error details for follow-up hardening',
-        ''
-    )
-    Set-Content -Path $Path -Value $initialContent -Encoding utf8
-}
-
-function Add-ResultsEntry {
-    param(
-        [string]$Path,
-        [string]$Outcome,
-        [string]$Details,
-        [string]$Url,
-        [string]$Backend,
-        [string]$BindHost,
-        [int]$Port,
-        [Nullable[int]]$ProcessId,
-        [string]$StatusSummary
-    )
-
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $hostname = [System.Net.Dns]::GetHostName()
-    $pidText = if ($null -ne $ProcessId) { $ProcessId.ToString() } else { 'n/a' }
-
-    $entry = @(
-        '',
-        "## $timestamp | $hostname | $Outcome",
-        '',
-        "- Timestamp: $timestamp",
-        "- Hostname: $hostname",
-        "- Backend: $Backend",
-        "- Bind Host: $BindHost",
-        "- Port: $Port",
-        "- URL: $Url",
-        "- PID: $pidText",
-        "- Summary: $StatusSummary",
-        "- Details: $Details",
-        ''
-    )
-
-    Add-Content -Path $Path -Value $entry -Encoding utf8
-}
 
 $pythonExe = Resolve-PythonExe -VirtualEnvPython $venvPython
 
@@ -143,12 +46,21 @@ $statusUrl = "http://$bindHost`:$port/status"
 $rootUrl = "http://$bindHost`:$port/"
 
 New-Item -ItemType Directory -Path $runtimeLogDir -Force | Out-Null
-Ensure-ResultsFile -Path $resultsPath
+$versions = Get-DependencyVersions -PythonExe $pythonExe
+$lifecycleLines = Get-LifecycleSectionLines -BindHost $bindHost -Port $port -RuntimeStatePath $runtimeStatePath -StdoutLog $stdoutLog -StderrLog $stderrLog
+$versionLines = Get-VersionSectionLines -Versions $versions
+Set-ResultsFileSections -Path $resultsPath -LifecycleLines $lifecycleLines -VersionLines $versionLines
 
 $existingStatus = Test-BunnyCamStatus -Url $statusUrl
 if ($existingStatus.Ok) {
     $summary = 'Endpoint already healthy; no new process started.'
-    Add-ResultsEntry -Path $resultsPath -Outcome 'success' -Details $summary -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $null -StatusSummary $summary
+    $existingProcess = Get-BunnyCamProcessFromPort -Port $port
+    $existingPid = if ($existingProcess) { [int]$existingProcess.ProcessId } else { $null }
+    if ($null -ne $existingPid) {
+        Write-RuntimeState -Path $runtimeStatePath -ProcessId $existingPid -Backend $backend -BindHost $bindHost -Port $port -Url $rootUrl -Actor $Actor -ManagedComponents $managedComponents
+    }
+    Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'success' -Details $summary -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $existingPid -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+    Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
     Write-Host "BunnyCam is already responding at $rootUrl"
     exit 0
 }
@@ -162,7 +74,8 @@ if (-not $SkipInstall) {
         if (-not $details) {
             $details = 'pip install -r requirements.txt returned a non-zero exit code.'
         }
-        Add-ResultsEntry -Path $resultsPath -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $null -StatusSummary $summary
+        Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $null -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+        Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
         throw 'Unable to install requirements.'
     }
 }
@@ -189,7 +102,8 @@ while ((Get-Date) -lt $deadline) {
         $stderrTail = Get-LogTail -Path $stderrLog
         $stdoutTail = Get-LogTail -Path $stdoutLog
         $details = if ($stderrTail) { $stderrTail } elseif ($stdoutTail) { $stdoutTail } else { 'No startup output captured.' }
-        Add-ResultsEntry -Path $resultsPath -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary
+        Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+        Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
         throw $summary
     }
 
@@ -210,7 +124,8 @@ if (-not $healthyPayload) {
     $stderrTail = Get-LogTail -Path $stderrLog
     $stdoutTail = Get-LogTail -Path $stdoutLog
     $details = if ($stderrTail) { $stderrTail } elseif ($stdoutTail) { $stdoutTail } else { 'No startup output captured before timeout.' }
-    Add-ResultsEntry -Path $resultsPath -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary
+    Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+    Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
     throw $summary
 }
 
@@ -223,7 +138,8 @@ while ((Get-Date) -lt $monitorDeadline) {
         $stderrTail = Get-LogTail -Path $stderrLog
         $stdoutTail = Get-LogTail -Path $stdoutLog
         $details = if ($stderrTail) { $stderrTail } elseif ($stdoutTail) { $stdoutTail } else { 'No output captured during post-start monitoring.' }
-        Add-ResultsEntry -Path $resultsPath -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary
+        Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+        Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
         throw $summary
     }
 
@@ -231,13 +147,16 @@ while ((Get-Date) -lt $monitorDeadline) {
     if (-not $statusResult.Ok) {
         $summary = 'BunnyCam process stayed alive but /status stopped responding during the monitor window.'
         $details = $statusResult.Error
-        Add-ResultsEntry -Path $resultsPath -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary
+        Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+        Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
         throw $summary
     }
 }
 
 $runtimeSummary = "Healthy on /status with runtime_initialized=$($healthyPayload.runtime_initialized) and backend=$($healthyPayload.backend)."
-Add-ResultsEntry -Path $resultsPath -Outcome 'success' -Details $runtimeSummary -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary 'BunnyCam started successfully and passed the monitor window.'
+Write-RuntimeState -Path $runtimeStatePath -ProcessId $process.Id -Backend $backend -BindHost $bindHost -Port $port -Url $rootUrl -Actor $Actor -ManagedComponents $managedComponents
+Add-ResultsEntry -Path $resultsPath -Action 'start' -Outcome 'success' -Details $runtimeSummary -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $process.Id -StatusSummary 'BunnyCam started successfully and passed the monitor window.' -Actor $Actor -ManagedComponents $managedComponents
+Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
 
 Write-Host "BunnyCam is healthy at $rootUrl"
 Write-Host "PID: $($process.Id)"
