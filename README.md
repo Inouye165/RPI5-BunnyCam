@@ -52,11 +52,29 @@ Typical local run:
 python3 sec_cam.py
 ```
 
+On Raspberry Pi, install the Python dependencies in your active environment first, then open:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 sec_cam.py
+```
+
+The default Pi bind address is `0.0.0.0:8000`, so browse to `http://localhost:8000/` on the Pi itself or replace `localhost` with the Pi LAN address from another machine.
+
 Local Windows development with a laptop webcam:
 
 ```bash
 CAMERA_BACKEND=laptop python sec_cam.py
 ```
+
+Recommended Windows local startup from the repo root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+.\start_local.ps1
+```
+
+That path starts the laptop camera backend on `http://127.0.0.1:8001/`.
 
 Windows convenience launchers are included for local development:
 
@@ -72,7 +90,7 @@ Windows convenience launchers are included for local development:
 bin\start_local.cmd
 ```
 
-Both default to `CAMERA_BACKEND=laptop` and `BUNNYCAM_PORT=8001`, while still allowing either environment variable to be overridden.
+Both default to `CAMERA_BACKEND=laptop`, `BUNNYCAM_PORT=8001`, and `BUNNYCAM_HOST=127.0.0.1`, while still allowing any of those environment variables to be overridden.
 
 VS Code workspace helpers are also included:
 
