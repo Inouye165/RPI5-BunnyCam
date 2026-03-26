@@ -43,6 +43,10 @@ Thumbs.db
 *.pfx
 *.bak
 
+# Generated runtime data and promoted identity galleries
+data/
+faces/known_people/
+
 # ML models (large binaries – download on first run)
 *.pt
 *.onnx
