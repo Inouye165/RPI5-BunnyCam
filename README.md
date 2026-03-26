@@ -149,9 +149,14 @@ Candidate collection artifacts:
 
 - `data/candidates/images/YYYY/MM/DD/`: saved candidate crops
 - `data/candidates/metadata/YYYY/MM/DD/`: per-candidate JSON metadata
+- `data/candidates/review/approved_manifest.json`: training-ready approved index
+- `data/candidates/review/rejected_manifest.json`: rejected index for exclusion
 - `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
+- `GET /review`: lightweight review and labeling queue UI
 
 Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
+
+The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
 
 VS Code workspace helpers are also included:
 
