@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from candidate_collection import CandidateCollector, CandidateCollectorConfig
+from review_queue import CandidateReviewQueue
 
 
 def _frame(height: int = 240, width: int = 320) -> np.ndarray:
@@ -48,6 +49,10 @@ def _collector(tmp_path: Path, **overrides) -> CandidateCollector:
 
 def _metadata_files(tmp_path: Path) -> list[Path]:
     return sorted((tmp_path / "data" / "candidates").rglob("*.json"))
+
+
+def _review_queue(tmp_path: Path) -> CandidateReviewQueue:
+    return CandidateReviewQueue(str(tmp_path / "data" / "candidates"))
 
 
 def test_candidate_collection_saves_first_good_sample_for_stable_track(tmp_path):
@@ -113,6 +118,9 @@ def test_candidate_collection_writes_expected_metadata(tmp_path):
     assert payload["track_id"] == 7
     assert payload["confidence"] == 0.91
     assert payload["bbox_norm"] == [0.2, 0.15, 0.72, 0.9]
+    assert payload["review_state"] == "unreviewed"
+    assert payload["reviewed_at"] is None
+    assert payload["corrected_class_name"] is None
     assert payload["quality"]["face_visible"] is True
     assert payload["source"]["frame_source"] == "detect_worker"
     assert payload["source"]["frame_width"] == 320
@@ -127,3 +135,74 @@ def test_candidate_collection_can_be_disabled(tmp_path):
     assert records == []
     assert _metadata_files(tmp_path) == []
     assert collector.get_status()["enabled"] is False
+
+
+def test_review_queue_lists_candidates_newest_first(tmp_path):
+    collector = _collector(tmp_path)
+    collector.collect(_frame(), [_detection(class_name="person", track_id=1)], captured_at=100.0)
+    collector.collect(_frame(), [_detection(class_name="dog", track_id=2)], captured_at=200.0)
+
+    payload = _review_queue(tmp_path).list_candidates()
+
+    assert payload["total"] == 2
+    assert payload["items"][0]["class_name"] == "dog"
+    assert payload["items"][1]["class_name"] == "person"
+
+
+def test_candidate_review_state_persists(tmp_path):
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(track_id=11)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    updated = queue.update_candidate(record["candidate_id"], review_state="approved")
+    reloaded = _review_queue(tmp_path).get_candidate(record["candidate_id"])
+    approved_manifest = tmp_path / "data" / "candidates" / "review" / "approved_manifest.json"
+
+    assert updated["review_state"] == "approved"
+    assert updated["reviewed_at"] is not None
+    assert reloaded["review_state"] == "approved"
+    assert approved_manifest.exists()
+    assert record["candidate_id"] in approved_manifest.read_text(encoding="utf-8")
+
+
+def test_candidate_reject_action_persists_correctly(tmp_path):
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(track_id=12)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    updated = queue.update_candidate(record["candidate_id"], review_state="rejected")
+    rejected_manifest = tmp_path / "data" / "candidates" / "review" / "rejected_manifest.json"
+
+    assert updated["review_state"] == "rejected"
+    assert updated["reviewed_at"] is not None
+    assert record["candidate_id"] in rejected_manifest.read_text(encoding="utf-8")
+
+
+def test_identity_label_assignment_persists_correctly(tmp_path):
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(class_name="dog", track_id=13)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    queue.update_candidate(record["candidate_id"], identity_label="Dobby", corrected_class_name="dog")
+    reloaded = _review_queue(tmp_path).get_candidate(record["candidate_id"])
+
+    assert reloaded["identity_label"] == "Dobby"
+    assert reloaded["corrected_class_name"] == "dog"
+    assert reloaded["effective_class_name"] == "dog"
+
+
+def test_review_queue_filters_by_state_and_class(tmp_path):
+    collector = _collector(tmp_path)
+    person = collector.collect(_frame(), [_detection(class_name="person", track_id=21)], captured_at=100.0)[0]
+    dog = collector.collect(_frame(), [_detection(class_name="dog", track_id=22)], captured_at=200.0)[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(person["candidate_id"], review_state="approved", identity_label="Ron")
+    queue.update_candidate(dog["candidate_id"], review_state="rejected")
+
+    approved_people = queue.list_candidates(review_state="approved", class_name="person", identity_filter="present")
+    rejected_dogs = queue.list_candidates(review_state="rejected", class_name="dog", identity_filter="missing")
+
+    assert approved_people["total"] == 1
+    assert approved_people["items"][0]["candidate_id"] == person["candidate_id"]
+    assert rejected_dogs["total"] == 1
+    assert rejected_dogs["items"][0]["candidate_id"] == dog["candidate_id"]

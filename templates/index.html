@@ -61,7 +61,7 @@
     .slider span { font-size: 12px; width: 50px; text-align: right; opacity: 0.85; }
 
     .tabs { display: flex; gap: 6px; }
-    .tab { border-radius: 10px; padding: 6px 10px; border: 1px solid #ccc; background: #fff; font-weight: 700; font-size: 12px; }
+    .tab { border-radius: 10px; padding: 6px 10px; border: 1px solid #ccc; background: #fff; font-weight: 700; font-size: 12px; text-decoration: none; color: inherit; display: inline-flex; align-items: center; }
     .tab.active { background: #111; color: #fff; border-color: #111; }
 
     .videoWrap { position: relative; width: 100%; }
@@ -223,6 +223,7 @@
       <div class="tabs">
         <button id="tabLive" class="tab active" type="button">Live</button>
         <button id="tabPlay" class="tab" type="button">Playback</button>
+        <a class="tab" href="/review">Review Queue</a>
       </div>
     </div>
 

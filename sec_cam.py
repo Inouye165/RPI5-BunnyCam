@@ -8,9 +8,12 @@ import subprocess
 from datetime import datetime
 from threading import Condition, Lock, Thread, Event
 from queue import Queue, Empty, Full
+from urllib.parse import quote
 
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
+from candidate_collection import encode_rgb_bmp
+from review_queue import CandidateReviewQueue
 
 # --------------------
 # Paths
@@ -66,6 +69,7 @@ FOCUS_SWEEP_SETTLE_S     = 0.08 # per step: drain stale frame + lens settle (~2.
 SNAPSHOT_DIR = os.path.join(BASE_DIR, "snapshots")
 RECORD_DIR_H264 = os.path.join(BASE_DIR, "recordings")        # temp/raw segments
 RECORD_DIR_MP4 = os.path.join(BASE_DIR, "recordings_mp4")     # browser-playable segments
+CANDIDATE_DATA_DIR = os.path.join(BASE_DIR, "data", "candidates")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(RECORD_DIR_H264, exist_ok=True)
 os.makedirs(RECORD_DIR_MP4, exist_ok=True)
@@ -811,6 +815,7 @@ def reconfig_worker():
 app = Flask(__name__)
 
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
+_review_queue = CandidateReviewQueue(CANDIDATE_DATA_DIR)
 
 
 def _load_template(name: str) -> str:
@@ -820,11 +825,17 @@ def _load_template(name: str) -> str:
 
 
 INDEX_HTML = _load_template("index.html")
+REVIEW_HTML = _load_template("review.html")
 
 
 @app.get("/")
 def index():
     return INDEX_HTML
+
+
+@app.get("/review")
+def review_page():
+    return REVIEW_HTML
 
 
 @app.get("/favicon.svg")
@@ -903,6 +914,43 @@ def _detection_status_payload():
             "saved_by_class": {},
         }),
     }
+
+
+def _review_candidate_with_urls(candidate: dict) -> dict:
+    payload = dict(candidate)
+    crop_path = candidate.get("crop_path")
+    frame_path = candidate.get("frame_path")
+    payload["crop_url"] = (
+        f"/candidate-collection/assets/{quote(str(crop_path), safe='/')}" if crop_path else None
+    )
+    payload["frame_url"] = (
+        f"/candidate-collection/assets/{quote(str(frame_path), safe='/')}" if frame_path else None
+    )
+    return payload
+
+
+def _read_ppm_asset(asset_path: str) -> np.ndarray:
+    with open(asset_path, "rb") as ppm_file:
+        magic = ppm_file.readline().strip()
+        if magic != b"P6":
+            raise ValueError("unsupported PPM format")
+
+        header_tokens: list[bytes] = []
+        while len(header_tokens) < 3:
+            line = ppm_file.readline()
+            if not line:
+                raise ValueError("invalid PPM header")
+            if line.startswith(b"#"):
+                continue
+            header_tokens.extend(line.split())
+
+        width, height, max_value = [int(token) for token in header_tokens[:3]]
+        if max_value != 255:
+            raise ValueError("unsupported PPM max value")
+        pixel_bytes = ppm_file.read(width * height * 3)
+        if len(pixel_bytes) != width * height * 3:
+            raise ValueError("truncated PPM data")
+    return np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((height, width, 3))
 
 
 def _camera_config_payload():
@@ -1125,6 +1173,58 @@ def detections_get():
 def candidate_collection_status():
     detection_status = _detection_status_payload()
     return jsonify(detection_status["candidate_collection"])
+
+
+@app.get("/candidate-collection/assets/<path:asset_path>")
+def candidate_collection_asset(asset_path):
+    try:
+        absolute_path = _review_queue.resolve_asset_path(asset_path)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "asset not found"}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    if absolute_path.lower().endswith(".ppm"):
+        try:
+            rgb_image = _read_ppm_asset(absolute_path)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return Response(encode_rgb_bmp(rgb_image), mimetype="image/bmp")
+
+    directory, filename = os.path.split(absolute_path)
+    return send_from_directory(directory, filename, as_attachment=False)
+
+
+@app.get("/api/review/candidates")
+def review_candidates_list():
+    payload = _review_queue.list_candidates(
+        review_state=request.args.get("state"),
+        class_name=request.args.get("class"),
+        identity_filter=request.args.get("identity", "all"),
+    )
+    payload["items"] = [_review_candidate_with_urls(item) for item in payload["items"]]
+    return jsonify(payload)
+
+
+@app.post("/api/review/candidates/<candidate_id>/review")
+def review_candidate_update(candidate_id):
+    data = request.get_json(silent=True) or {}
+    update_kwargs = {}
+    if "review_state" in data:
+        update_kwargs["review_state"] = data.get("review_state")
+    if "identity_label" in data:
+        update_kwargs["identity_label"] = data.get("identity_label")
+    if "corrected_class_name" in data:
+        update_kwargs["corrected_class_name"] = data.get("corrected_class_name")
+
+    try:
+        payload = _review_queue.update_candidate(candidate_id, **update_kwargs)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "candidate not found"}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    return jsonify({"ok": True, "candidate": _review_candidate_with_urls(payload)})
 
 
 @app.get("/face/list")

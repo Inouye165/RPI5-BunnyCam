@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import struct
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,49 @@ from typing import Any
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def encode_rgb_bmp(rgb_u8: np.ndarray) -> bytes:
+    """Encode an RGB uint8 image as a 24-bit BMP for browser-safe fallback."""
+    rgb_u8 = np.ascontiguousarray(rgb_u8.astype(np.uint8, copy=False))
+    height, width = rgb_u8.shape[:2]
+    row_stride = width * 3
+    padded_stride = (row_stride + 3) & ~3
+    pixel_array_size = padded_stride * height
+    file_header_size = 14
+    dib_header_size = 40
+    pixel_offset = file_header_size + dib_header_size
+    file_size = pixel_offset + pixel_array_size
+    padding = b"\x00" * (padded_stride - row_stride)
+
+    file_header = struct.pack(
+        "<2sIHHI",
+        b"BM",
+        file_size,
+        0,
+        0,
+        pixel_offset,
+    )
+    dib_header = struct.pack(
+        "<IIIHHIIIIII",
+        dib_header_size,
+        width,
+        height,
+        1,
+        24,
+        0,
+        pixel_array_size,
+        2835,
+        2835,
+        0,
+        0,
+    )
+
+    rows = []
+    for row in rgb_u8[::-1]:
+        bgr_row = row[:, ::-1].tobytes()
+        rows.append(bgr_row + padding)
+    return file_header + dib_header + b"".join(rows)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -244,6 +288,9 @@ class CandidateCollector:
             "timestamp": created_at,
             "class_name": class_name,
             "identity_label": identity_label,
+            "review_state": "unreviewed",
+            "reviewed_at": None,
+            "corrected_class_name": None,
             "track_id": int(det["track_id"]),
             "track_hits": int(det.get("track_hits", 0) or 0),
             "bbox_norm": [float(v) for v in det.get("box", [])],
@@ -294,10 +341,9 @@ class CandidateCollector:
             Image.fromarray(rgb_u8, mode="RGB").save(path, format="JPEG", quality=90)
             return path
         except (ImportError, AttributeError, OSError, ValueError):
-            path = base_path + ".ppm"
+            path = base_path + ".bmp"
             with open(path, "wb") as image_file:
-                image_file.write(f"P6\n{rgb_u8.shape[1]} {rgb_u8.shape[0]}\n255\n".encode("ascii"))
-                image_file.write(rgb_u8.tobytes())
+                image_file.write(encode_rgb_bmp(rgb_u8))
             return path
 
     def _extract_crop(

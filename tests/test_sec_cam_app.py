@@ -182,6 +182,125 @@ def test_candidate_collection_status_route(monkeypatch):
     assert payload["saved_by_class"]["dog"] == 1
 
 
+def _make_review_item(**overrides):
+    payload = {
+        "candidate_id": "20260326T120000000000_person_t0001_s001",
+        "timestamp": "2026-03-26T12:00:00.000Z",
+        "class_name": "person",
+        "effective_class_name": "person",
+        "review_state": "unreviewed",
+        "identity_label": None,
+        "track_id": 1,
+        "track_hits": 3,
+        "confidence": 0.9,
+        "crop_path": "images/2026/03/26/sample.bmp",
+        "frame_path": None,
+        "metadata_path": "metadata/2026/03/26/sample.json",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_review_page_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/review")
+
+    assert response.status_code == 200
+    assert b"Candidate Review Queue" in response.data
+
+
+def test_review_candidates_list_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        list_candidates=lambda **_kwargs: {
+            "items": [_make_review_item()],
+            "total": 1,
+            "summary": {"total": 1, "unreviewed": 1, "approved": 0, "rejected": 0, "labeled": 0},
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/candidates?state=unreviewed&class=person&identity=missing")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["candidate_id"].startswith("20260326T")
+    assert payload["items"][0]["crop_url"].endswith("images/2026/03/26/sample.bmp")
+
+
+def test_review_candidate_approve_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(review_state="approved", identity_label="Ron")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-1/review", json={
+        "review_state": "approved",
+        "identity_label": "Ron",
+        "corrected_class_name": "person",
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["candidate"]["review_state"] == "approved"
+    assert calls == [("candidate-1", {
+        "review_state": "approved",
+        "identity_label": "Ron",
+        "corrected_class_name": "person",
+    })]
+
+
+def test_review_candidate_reject_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(review_state="rejected")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-2/review", json={"review_state": "rejected"})
+
+    assert response.status_code == 200
+    assert response.get_json()["candidate"]["review_state"] == "rejected"
+    assert calls == [("candidate-2", {"review_state": "rejected"})]
+
+
+def test_review_candidate_label_update_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(identity_label="Dobby", effective_class_name="dog", class_name="dog")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-3/review", json={
+        "identity_label": "Dobby",
+        "corrected_class_name": "dog",
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["candidate"]["identity_label"] == "Dobby"
+    assert calls == [("candidate-3", {"identity_label": "Dobby", "corrected_class_name": "dog"})]
+
+
 def test_detections_when_detect_module_unavailable(monkeypatch):
     """Badge should show OFF with reason when _detect is None."""
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
