@@ -79,9 +79,19 @@ That path now handles the full local startup flow:
 - starts `sec_cam.py` in the background
 - checks `http://127.0.0.1:8001/status` until healthy
 - monitors the process briefly for early crash behavior
+- writes runtime state for deterministic shutdown
 - appends a timestamped result entry with hostname to `STARTUP_RESULTS.md`
+- refreshes the startup markdown lifecycle and dependency-version sections
 
 That path starts the laptop camera backend on `http://127.0.0.1:8001/`.
+
+Recommended Windows local shutdown from the repo root:
+
+```powershell
+.\stop_local.ps1
+```
+
+That path reads the recorded runtime state or falls back to the listener on the configured port, stops BunnyCam, and appends a timestamped shutdown result to `STARTUP_RESULTS.md`.
 
 Windows convenience launchers are included for local development:
 
@@ -90,11 +100,23 @@ Windows convenience launchers are included for local development:
 ```
 
 ```powershell
+.\stop_local.ps1
+```
+
+```powershell
 .\bin\start_local.ps1
+```
+
+```powershell
+.\bin\stop_local.ps1
 ```
 
 ```bat
 bin\start_local.cmd
+```
+
+```bat
+bin\stop_local.cmd
 ```
 
 Both default to `CAMERA_BACKEND=laptop`, `BUNNYCAM_PORT=8001`, and `BUNNYCAM_HOST=127.0.0.1`, while still allowing any of those environment variables to be overridden.
@@ -106,9 +128,19 @@ Useful switches for the PowerShell launcher:
 .\start_local.ps1 -StartupTimeoutSec 90 -PostStartMonitorSec 30
 ```
 
+Launcher metadata switches for LLS or operator notes:
+
+```powershell
+.\start_local.ps1 -Actor LLS -Issue "..." -Fix "..." -Note "..."
+.\stop_local.ps1 -Actor LLS -Issue "..." -Fix "..." -Note "..."
+```
+
+When `-Actor LLS` is used, `STARTUP_RESULTS.md` keeps the issue, fix, and note in a separate `LLS Session Notes` section keyed by timestamp and hostname.
+
 Runtime artifacts:
 
 - `STARTUP_RESULTS.md`: tracked markdown history of startup success and failure across devices
+- `logs/bunnycam-runtime.json`: latest managed runtime PID and endpoint details for shutdown
 - `logs/bunnycam-start.stdout.log`: latest process stdout
 - `logs/bunnycam-start.stderr.log`: latest process stderr
 
