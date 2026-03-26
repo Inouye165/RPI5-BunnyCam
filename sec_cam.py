@@ -882,6 +882,11 @@ def _detection_status_payload():
             "face_recognition_enabled": False,
             "face_recognition_reason": "detect module unavailable",
             "identity_labeling_enabled": False,
+            "candidate_collection": {
+                "enabled": False,
+                "saved_total": 0,
+                "saved_by_class": {},
+            },
         }
 
     detect_status = _detect.get_status()
@@ -892,6 +897,11 @@ def _detection_status_payload():
         "face_recognition_enabled": bool(detect_status.get("face_recognition_enabled", False)),
         "face_recognition_reason": detect_status.get("face_recognition_reason"),
         "identity_labeling_enabled": bool(detect_status.get("identity_labeling_enabled", False)),
+        "candidate_collection": detect_status.get("candidate_collection", {
+            "enabled": False,
+            "saved_total": 0,
+            "saved_by_class": {},
+        }),
     }
 
 
@@ -1109,6 +1119,12 @@ def detections_get():
         "reason": detection_status["detection_reason"],
         "face_recognition_enabled": detection_status["face_recognition_enabled"],
     })
+
+
+@app.get("/candidate-collection/status")
+def candidate_collection_status():
+    detection_status = _detection_status_payload()
+    return jsonify(detection_status["candidate_collection"])
 
 
 @app.get("/face/list")

@@ -4,11 +4,10 @@ Unit tests for the lightweight person-identity tracker in detect.py.
 
 All tests are pure Python — no camera hardware, no YOLO model, no
 face_recognition library required.  The tracker is exercised by directly
-calling _PersonTracker.update() with pre-built detection dicts.
+calling _DetectionTracker.update() with pre-built detection dicts.
 """
 
 import sys
-import time
 import types
 
 import pytest
@@ -25,14 +24,14 @@ def _import_tracker_module():
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
 
-    import importlib, sys as _sys
+    import sys as _sys
     _sys.modules.pop("detect", None)
     import detect as _d
     return _d
 
 
 @pytest.fixture(autouse=True)
-def _fresh_module(monkeypatch):
+def _fresh_module():
     """Re-import detect and reset the global tracker before every test."""
     d = _import_tracker_module()
     # Reset the module-level tracker so tests are independent.
@@ -85,6 +84,17 @@ class TestBasicTracking:
         det2 = _person(_box(0.12, 0.1, 0.42, 0.8))
         d._tracker.update([det2])
         assert det2["track_id"] == tid, "track_id should persist through small movement"
+
+    def test_cat_keeps_track_id_across_frames(self, _fresh_module):
+        d = _fresh_module
+        det1 = {"label": "cat", "class": "cat", "conf": 0.88, "box": _box(0.2, 0.2, 0.45, 0.65)}
+        d._tracker.update([det1])
+        tid = det1["track_id"]
+
+        det2 = {"label": "cat", "class": "cat", "conf": 0.87, "box": _box(0.22, 0.21, 0.47, 0.66)}
+        d._tracker.update([det2])
+        assert det2["track_id"] == tid
+        assert det2["track_hits"] >= 2
 
 
 # ---------------------------------------------------------------------------
