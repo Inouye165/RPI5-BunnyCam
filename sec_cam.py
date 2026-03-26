@@ -159,6 +159,7 @@ motion_state = {
 dvr_lock = Lock()
 # Each item: {"file": "seg_YYYYMMDD_HHMMSS.mp4", "start_epoch": int, "duration": int}
 dvr_segments = []
+CONVERT_QUEUE_MAXSIZE = 2
 
 
 def now_iso():
@@ -498,6 +499,58 @@ def save_snapshot(jpeg_bytes: bytes) -> str:
     return path
 
 
+def _looks_like_jpeg(jpeg_bytes: bytes) -> bool:
+    return bool(jpeg_bytes) and jpeg_bytes.startswith(b"\xff\xd8") and jpeg_bytes.endswith(b"\xff\xd9")
+
+
+def _read_stream_jpeg_frame() -> bytes | None:
+    with stream_output.condition:
+        frame = stream_output.frame
+    if not frame or not _looks_like_jpeg(frame):
+        return None
+    return bytes(frame)
+
+
+def _summarize_ffmpeg_output(output: str | bytes | None, max_chars: int = 400) -> str:
+    if not output:
+        return "no ffmpeg output"
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    output = " ".join(output.strip().split())
+    if not output:
+        return "no ffmpeg output"
+    if len(output) <= max_chars:
+        return output
+    return "..." + output[-max_chars:]
+
+
+def _run_ffmpeg_command(cmd: list[str]) -> tuple[bool, str | None]:
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return True, None
+    except OSError as exc:
+        return False, str(exc)
+    except subprocess.CalledProcessError as exc:
+        output = exc.stderr or exc.stdout
+        return False, f"exit {exc.returncode}: {_summarize_ffmpeg_output(output)}"
+
+
+def _queue_convert_job(h264_path: str, start_epoch: int, duration: int) -> bool:
+    try:
+        convert_q.put_nowait((h264_path, start_epoch, duration))
+        return True
+    except Full:
+        logger.warning(
+            "DVR conversion queue full; leaving raw segment unconverted: path=%s start_epoch=%s duration=%s queue_size=%s/%s",
+            h264_path,
+            start_epoch,
+            duration,
+            convert_q.qsize(),
+            CONVERT_QUEUE_MAXSIZE,
+        )
+        return False
+
+
 def roi_apply(gray2d, roi_lores):
     if not roi_lores:
         return gray2d
@@ -594,7 +647,7 @@ def motion_loop():
             if now - last_event_time >= cooldown:
                 last_event_time = now
                 snap_path = None
-                jpeg = stream_output.frame
+                jpeg = _read_stream_jpeg_frame()
                 if jpeg:
                     snap_path = save_snapshot(jpeg)
                 with state_lock:
@@ -609,7 +662,7 @@ def motion_loop():
 # --------------------
 # Rolling recorder with MP4 conversion
 # --------------------
-convert_q: Queue = Queue()
+convert_q: Queue = Queue(maxsize=CONVERT_QUEUE_MAXSIZE)
 
 def next_h264_segment():
     # Use segment start timestamp in filename
@@ -654,37 +707,41 @@ def convert_worker():
             fps = int(cfg["record_fps"])
 
         # Fast remux first (no re-encode). If it fails, fall back to re-encode.
-        ok = False
-        try:
-            cmd = [
+        remux_cmd = [
+            "ffmpeg", "-y",
+            "-r", str(fps),
+            "-i", h264_path,
+            "-c:v", "copy",
+            "-movflags", "+faststart",
+            mp4_path
+        ]
+        ok, remux_error = _run_ffmpeg_command(remux_cmd)
+
+        if not ok:
+            reencode_cmd = [
                 "ffmpeg", "-y",
                 "-r", str(fps),
                 "-i", h264_path,
-                "-c:v", "copy",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
                 "-movflags", "+faststart",
                 mp4_path
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            ok = True
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-
-        if not ok:
-            try:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-r", str(fps),
-                    "-i", h264_path,
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-movflags", "+faststart",
-                    mp4_path
-                ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                ok = True
-            except (OSError, subprocess.SubprocessError):
-                ok = False
+            ok, reencode_error = _run_ffmpeg_command(reencode_cmd)
+            if ok:
+                logger.info(
+                    "ffmpeg remux failed for %s; re-encoded instead: %s",
+                    h264_path,
+                    remux_error,
+                )
+            else:
+                logger.warning(
+                    "ffmpeg conversion failed for %s; raw segment preserved. remux_error=%s reencode_error=%s",
+                    h264_path,
+                    remux_error,
+                    reencode_error,
+                )
 
         if ok:
             with dvr_lock:
@@ -751,7 +808,7 @@ def rolling_record_loop():
 
         # Queue conversion for finished segment (if found)
         if finished_h264 and finished_start_epoch:
-            convert_q.put((finished_h264, finished_start_epoch, seg))
+            _queue_convert_job(finished_h264, finished_start_epoch, seg)
 
 def load_existing_mp4_manifest():
     # On startup, load existing mp4 files so the slider works immediately after reboot
@@ -1148,13 +1205,17 @@ def identity_enroll():
     if not box or not isinstance(box, list) or len(box) != 4:
         return jsonify({"ok": False, "error": "box required (4 floats)"}), 400
 
-    if category in ("cat", "dog"):
-        ok, msg = _detect.set_pet_label(category, name)
-    elif category == "person":
-        ok, msg = _detect.snapshot_enroll(name, box)
-    else:
-        return jsonify({"ok": False,
-                        "error": f"unsupported category '{category}'"}), 400
+    try:
+        if category in ("cat", "dog"):
+            ok, msg = _detect.set_pet_label(category, name)
+        elif category == "person":
+            ok, msg = _detect.snapshot_enroll(name, box)
+        else:
+            return jsonify({"ok": False,
+                            "error": f"unsupported category '{category}'"}), 400
+    except Exception as exc:  # pragma: no cover - defensive JSON contract guard
+        logger.exception("Identity enroll failed for category=%s name=%s", category, name)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
     if ok:
         return jsonify({"ok": True, "message": msg})

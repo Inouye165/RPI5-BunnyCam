@@ -310,7 +310,7 @@
         </form>
       </div>
 
-      <div id="selectedBanner" class="selected-banner" style="display:none;">
+      <div id="selectedBanner" class="selected-banner">
         <span class="sel-label" id="selLabel">No box selected</span>
         <button id="nameSelectedBtn" type="button" disabled>&#x270F; Name selected box</button>
         <button id="clearSelBtn" type="button">Deselect</button>
@@ -425,7 +425,14 @@ function buzz() {
 async function postJSON(url, body) {
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const text = await r.text();
-    const data = text ? JSON.parse(text) : {};
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (_err) {
+        data = { error: text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || ('Request failed: ' + r.status) };
+      }
+    }
     if (!r.ok) {
         throw new Error(data.error || ('Request failed: ' + r.status));
     }
@@ -783,6 +790,17 @@ wrap.addEventListener('pointercancel', () => {
     dragging = false;
 });
 
+wrap.addEventListener('dblclick', (e) => {
+  if (liveWrap.classList.contains('hidden')) return;
+  const r = wrap.getBoundingClientRect();
+  const x = clamp01((e.clientX - r.left) / r.width);
+  const y = clamp01((e.clientY - r.top) / r.height);
+  const hitIdx = hitTestDetection(x, y);
+  if (hitIdx < 0) return;
+  selectDetection(hitIdx);
+  showEnrollModal(lastDetections[hitIdx], hitIdx);
+});
+
 // DVR: load manifest, map slider to segments
 function fmtAgo(sec){
   const m = Math.floor(sec / 60);
@@ -926,6 +944,7 @@ function detColor(label, cls) {
 let lastDetections = [];
 let selectedDetIdx = -1;
 let selectedDet = null;  // snapshot of the selected detection
+let enrollModalOverlay = null;
 const selectedBanner = document.getElementById('selectedBanner');
 const selLabel = document.getElementById('selLabel');
 const selHint = document.getElementById('selHint');
@@ -998,7 +1017,7 @@ function selectDetection(idx) {
 
   // Update selection banner
   selLabel.textContent = 'Selected: ' + det.label + ' (' + Math.round(det.conf * 100) + '%)';
-  selHint.textContent = 'Click \"Name selected box\" to enroll';
+  selHint.textContent = 'Click "Name selected box" or double-click the box to enroll';
   nameSelectedBtn.disabled = false;
   selectedBanner.style.display = '';
 
@@ -1013,10 +1032,10 @@ function selectDetection(idx) {
 function clearSelection() {
   selectedDetIdx = -1;
   selectedDet = null;
-  selectedBanner.style.display = 'none';
   selLabel.textContent = 'No box selected';
   selHint.textContent = 'Click a detected box in the live view to select it';
   nameSelectedBtn.disabled = true;
+  selectedBanner.style.display = '';
   drawDetections(lastDetections);
 }
 
@@ -1026,11 +1045,16 @@ nameSelectedBtn.addEventListener('click', () => {
 clearSelBtn.addEventListener('click', clearSelection);
 
 function showEnrollModal(det, idx) {
+  if (enrollModalOverlay) {
+    enrollModalOverlay.remove();
+    enrollModalOverlay = null;
+  }
   selectedDetIdx = idx;
   drawDetections(lastDetections);
 
   const overlay = document.createElement('div');
   overlay.className = 'enroll-modal-overlay';
+  enrollModalOverlay = overlay;
   const cls = det.class;
   const isPet = (cls === 'cat' || cls === 'dog');
   overlay.innerHTML = `
@@ -1053,7 +1077,9 @@ function showEnrollModal(det, idx) {
   const cancelBtn = overlay.querySelector('.btn-cancel');
 
   function close() {
-    clearSelection();
+    if (enrollModalOverlay === overlay) {
+      enrollModalOverlay = null;
+    }
     overlay.remove();
   }
 
@@ -1066,11 +1092,13 @@ function showEnrollModal(det, idx) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
     try {
-      const resp = await postJSON('/identity/enroll', {
+      const currentDet = selectedDet && selectedDet.class === cls ? selectedDet : det;
+      await postJSON('/identity/enroll', {
         name: name,
         category: cls,
-        box: det.box,
+        box: currentDet.box,
       });
+      selHint.textContent = 'Click "Name selected box" or double-click the box to enroll';
       close();
       requestIdentityRefresh();
     } catch (e) {

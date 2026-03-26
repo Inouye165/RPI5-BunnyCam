@@ -420,12 +420,14 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
         if x2 <= x1 or y2 <= y1:
             return False, "invalid bounding box"
 
-        crop = frame[y1:y2, x1:x2]
+        crop = np.ascontiguousarray(frame[y1:y2, x1:x2])
         encs = fr.face_encodings(crop)
         if not encs:
-            encs = fr.face_encodings(
+            expanded = np.ascontiguousarray(
                 frame[max(0, y1 - 20):min(h, y2 + 20),
-                      max(0, x1 - 20):min(w, x2 + 20)])
+                      max(0, x1 - 20):min(w, x2 + 20)]
+            )
+            encs = fr.face_encodings(expanded)
         if not encs:
             return False, ("no face detected in selected area "
                            "— try when the face is clearly visible")
@@ -441,5 +443,6 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
                 _known_encs.append(encs[0])
 
         return True, f"Enrolled '{safe}' from live frame"
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        logger.warning("detect: snapshot enroll failed for '%s' — %s", safe, exc)
         return False, str(exc)
