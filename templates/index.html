@@ -163,6 +163,7 @@
     }
     .identity-chip .remove-btn:hover { color: #f44336; }
     .identity-empty { font-size: 12px; opacity: 0.7; }
+    .identity-status { margin-top: 6px; font-size: 11px; opacity: 0.8; line-height: 1.4; }
 
     /* --- Enrollment modal --- */
     .enroll-modal-overlay {
@@ -331,6 +332,7 @@
         <div id="identityList" class="identity-list">
           <span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>
         </div>
+        <div id="identityStatus" class="identity-status hidden"></div>
       </div>
 
       <div id="meta" class="meta"></div>
@@ -1219,44 +1221,61 @@ async function enrollFace(evt) {
 // ── Identity panel ──────────────────────────────────────────────────────────
 const identityPanel = document.getElementById('identityPanel');
 const identityListEl = document.getElementById('identityList');
+const identityStatusEl = document.getElementById('identityStatus');
 
 async function refreshIdentityPanel({ signal } = {}) {
-  const d = await fetchJSON('/identity/labels', { signal });
+  const [d, status] = await Promise.all([
+    fetchJSON('/identity/labels', { signal }),
+    fetchJSON('/status', { signal }),
+  ]);
   const faces = d.faces || [];
   const pets = d.pets || {};
+  const petMatcher = status.pet_identity_matching || {};
   const hasAny = faces.length > 0 || Object.keys(pets).length > 0;
 
   identityPanel.classList.toggle('hidden', !hasAny && !d.identity_labeling_enabled);
   if (!hasAny) {
     identityListEl.innerHTML = '<span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>';
-    return;
-  }
+  } else {
+    let html = '';
+    for (const name of faces) {
+      html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
+    }
+    for (const [cls, name] of Object.entries(pets)) {
+      const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
+      html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
+    }
+    identityListEl.innerHTML = html;
 
-  let html = '';
-  for (const name of faces) {
-    html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
-  }
-  for (const [cls, name] of Object.entries(pets)) {
-    const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
-    html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
-  }
-  identityListEl.innerHTML = html;
-
-  identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const cat = btn.dataset.cat;
-      const name = btn.dataset.name;
-      if (!confirm(`Remove "${name}"?`)) return;
-      try {
-        await fetchJSON('/identity/label', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, category: cat }),
-        });
-        requestIdentityRefresh();
-      } catch (e) { alert('Delete failed: ' + e.message); }
+    identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cat = btn.dataset.cat;
+        const name = btn.dataset.name;
+        if (!confirm(`Remove "${name}"?`)) return;
+        try {
+          await fetchJSON('/identity/label', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, category: cat }),
+          });
+          requestIdentityRefresh();
+        } catch (e) { alert('Delete failed: ' + e.message); }
+      });
     });
-  });
+  }
+
+  const matcherCounts = petMatcher.pet_sample_counts || {};
+  const matcherNames = Object.entries(matcherCounts).map(([name, count]) => `${name}:${count}`);
+  const recentMatch = petMatcher.recent_match;
+  const recentText = recentMatch
+    ? `Recent pet match: ${recentMatch.matched ? recentMatch.identity_label : recentMatch.reason}`
+    : 'Recent pet match: none';
+  identityStatusEl.classList.remove('hidden');
+  identityStatusEl.textContent = [
+    `Pet matcher ${petMatcher.enabled ? 'ON' : 'OFF'}${petMatcher.reason ? ` (${petMatcher.reason})` : ''}`,
+    `Promoted pets: ${petMatcher.pet_identity_count || 0} identities / ${petMatcher.pet_sample_count || 0} samples${matcherNames.length ? ` [${matcherNames.join(', ')}]` : ''}`,
+    recentText,
+  ].join(' | ');
 }
 
 function esc(s) {

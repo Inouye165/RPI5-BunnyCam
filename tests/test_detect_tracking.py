@@ -7,6 +7,8 @@ face_recognition library required.  The tracker is exercised by directly
 calling _DetectionTracker.update() with pre-built detection dicts.
 """
 
+# pylint: disable=protected-access,unused-argument
+
 import sys
 import types
 
@@ -24,8 +26,7 @@ def _import_tracker_module():
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
 
-    import sys as _sys
-    _sys.modules.pop("detect", None)
+    sys.modules.pop("detect", None)
     import detect as _d
     return _d
 
@@ -53,6 +54,20 @@ def _person(box, label="person", face_dist=None):
 
 def _box(x1, y1, x2, y2):
     return [x1, y1, x2, y2]
+
+
+def _pet(cls_name, box=None, label=None, pet_match=None, matcher_active=True):
+    det = {
+        "label": label or cls_name,
+        "class": cls_name,
+        "conf": 0.88,
+        "box": list(box or _box(0.2, 0.2, 0.45, 0.65)),
+    }
+    if matcher_active:
+        det["_pet_matcher_active"] = True
+    if pet_match is not None:
+        det["_pet_match"] = pet_match
+    return det
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +189,53 @@ class TestStickyIdentity:
         for _ in range(3):
             d._tracker.update([det])
         assert det["label"] == "person"
+
+    def test_pet_identity_persists_across_short_weak_period(self, _fresh_module):
+        d = _fresh_module
+        strong_match = {
+            "matched": True,
+            "identity_label": "Dobby",
+            "score": 0.93,
+        }
+
+        det1 = _pet("dog", pet_match=strong_match)
+        det2 = _pet("dog", box=_box(0.22, 0.21, 0.47, 0.66), pet_match=strong_match)
+        det3 = _pet("dog", box=_box(0.24, 0.22, 0.49, 0.67), pet_match=strong_match)
+        d._tracker.update([det1])
+        d._tracker.update([det2])
+        d._tracker.update([det3])
+        assert det3["label"] == "Dobby"
+
+        weak = _pet("dog", box=_box(0.25, 0.23, 0.5, 0.68), pet_match={
+            "matched": False,
+            "identity_label": None,
+            "score": 0.0,
+        })
+        d._tracker.update([weak])
+        assert weak["label"] == "Dobby"
+
+    def test_pet_identity_drops_after_grace_window(self, _fresh_module):
+        d = _fresh_module
+        strong_match = {
+            "matched": True,
+            "identity_label": "Dobby",
+            "score": 0.94,
+        }
+
+        for index in range(3):
+            det = _pet("dog", box=_box(0.2 + index * 0.01, 0.2, 0.45 + index * 0.01, 0.65), pet_match=strong_match)
+            d._tracker.update([det])
+        assert det["label"] == "Dobby"
+
+        for index in range(d.PET_MATCH_GRACE_FRAMES + 1):
+            weak = _pet("dog", box=_box(0.24 + index * 0.005, 0.2, 0.49 + index * 0.005, 0.65), pet_match={
+                "matched": False,
+                "identity_label": None,
+                "score": 0.0,
+            })
+            d._tracker.update([weak])
+
+        assert weak["label"] == "dog"
 
 
 # ---------------------------------------------------------------------------
