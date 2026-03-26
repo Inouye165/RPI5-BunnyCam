@@ -36,6 +36,7 @@ from typing import Callable
 import numpy as np
 
 from candidate_collection import CandidateCollector, CandidateCollectorConfig
+from identity_gallery import load_known_face_gallery
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,13 @@ _models: dict = {"yolo": None, "fr": None}
 _known_names: list[str]       = []
 _known_encs:  list[np.ndarray] = []
 _pet_labels:  dict[str, str]  = {}   # class → pet name  ("cat" → "Mochi")
+_face_gallery_status: dict = {
+    "people_identity_count": 0,
+    "people_encoding_count": 0,
+    "people_encoding_counts": {},
+}
+_frame_state: dict = {"latest_frame": None}
 _latest: dict = {"detections": [], "ts": 0.0, "model": "none"}
-_latest_frame: np.ndarray | None = None
 _status: dict = {
     "detection_enabled": False,
     "detection_reason": "YOLO model not loaded yet",
@@ -299,21 +305,13 @@ def _load_faces() -> None:
         return
 
     os.makedirs(FACES_DIR, exist_ok=True)
-    names: list[str]        = []
-    encs:  list[np.ndarray] = []
-
+    names: list[str] = []
+    encs: list[np.ndarray] = []
     for fname in sorted(os.listdir(FACES_DIR)):
         path = os.path.join(FACES_DIR, fname)
         stem = os.path.splitext(fname)[0]
 
-        if fname.lower().endswith(".npy"):
-            try:
-                encs.append(np.load(path))
-                names.append(stem)
-            except (OSError, ValueError) as exc:
-                logger.warning("detect: could not load %s — %s", fname, exc)
-
-        elif fname.lower().endswith((".jpg", ".jpeg", ".png")):
+        if fname.lower().endswith((".jpg", ".jpeg", ".png")):
             npy = os.path.join(FACES_DIR, stem + ".npy")
             if os.path.exists(npy):
                 continue  # already encoded
@@ -322,17 +320,19 @@ def _load_faces() -> None:
                 found = fr.face_encodings(img)
                 if found:
                     np.save(npy, found[0])
-                    names.append(stem)
-                    encs.append(found[0])
                     logger.info("detect: auto-encoded face '%s'", stem)
                 else:
                     logger.warning("detect: no face found in %s", fname)
             except (OSError, ValueError, RuntimeError) as exc:
                 logger.warning("detect: error encoding %s — %s", fname, exc)
 
+    names, encs, gallery_status = load_known_face_gallery(FACES_DIR)
+
     with _lock:
         _known_names[:] = names
         _known_encs[:]  = encs
+        _face_gallery_status.clear()
+        _face_gallery_status.update(gallery_status)
     _set_face_status(True, None)
     logger.info("detect: loaded %d face(s): %s", len(names), names)
 
@@ -341,13 +341,13 @@ def _load_faces() -> None:
 
 def _load_pet_labels() -> None:
     """Load pet labels from faces/labels.json."""
-    global _pet_labels
     if os.path.isfile(LABELS_FILE):
         try:
             with open(LABELS_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                _pet_labels = data
+                _pet_labels.clear()
+                _pet_labels.update(data)
                 logger.info("detect: loaded pet labels %s", _pet_labels)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("detect: could not load labels.json — %s", exc)
@@ -464,14 +464,13 @@ def _worker(get_frame_fn: Callable) -> None:
     _load_faces()
     _load_pet_labels()
 
-    global _latest_frame
     interval = 1.0 / DETECT_FPS
     while not _stop.is_set():
         t0 = time.time()
         try:
             frame = get_frame_fn()
             if frame is not None:
-                _latest_frame = frame
+                _frame_state["latest_frame"] = frame
                 dets = _run(frame)
                 _candidate_collector.collect(
                     frame,
@@ -520,7 +519,9 @@ def get_status() -> dict:
             "face_recognition_reason": _status["face_recognition_reason"],
             "identity_labeling_enabled": True,
             "pet_labels": dict(_pet_labels),
-            "known_faces": list(_known_names),
+            "known_faces": sorted(set(_known_names), key=str.lower),
+            "known_face_counts": dict(_face_gallery_status.get("people_encoding_counts", {})),
+            "known_face_samples": int(_face_gallery_status.get("people_encoding_count", 0)),
             "model": _latest.get("model", "none"),
             "candidate_collection": _candidate_collector.get_status(),
         }
@@ -528,7 +529,7 @@ def get_status() -> dict:
 
 def list_faces() -> list[str]:
     with _lock:
-        return list(_known_names)
+        return sorted(set(_known_names), key=str.lower)
 
 
 def reload_faces() -> None:
@@ -618,7 +619,7 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
         return False, ("face_recognition not installed "
                        "— cannot enroll person from live frame")
 
-    frame = _latest_frame
+    frame = _frame_state.get("latest_frame")
     if frame is None:
         return False, "no live frame available yet"
 
