@@ -177,7 +177,10 @@ Reviewed identity promotion is conservative by design as well:
 - rejected items never promote
 - people must yield a usable face encoding to promote
 - near-duplicate person encodings are suppressed so galleries stay compact
-- pet promotion creates a durable local gallery for later work, but does not force live pet identity matching in this phase
+- promoted pet galleries are loaded on startup for conservative live cat/dog identity matching
+- live pet identity uses a lightweight local descriptor (color histogram + small grayscale signature)
+- pet naming stays conservative: a strong class-compatible match plus a margin over alternatives is required, otherwise the app falls back to generic `cat` / `dog`
+- matched pet tracks keep their identity briefly through short weak periods, then fall back cleanly after continuity is lost
 
 VS Code workspace helpers are also included:
 

@@ -141,6 +141,16 @@ def test_status_route_includes_detection_state(monkeypatch):
             "detection_reason": None,
             "face_recognition_enabled": False,
             "face_recognition_reason": "face_recognition not installed",
+            "pet_identity_matching": {
+                "enabled": True,
+                "reason": None,
+                "pet_identity_count": 1,
+                "pet_sample_count": 3,
+                "pet_sample_counts": {"Dobby": 3},
+                "pet_class_sample_counts": {"dog": 3},
+                "thresholds": {"max_distance": 0.22, "min_margin": 0.06},
+                "recent_match": {"matched": True, "identity_label": "Dobby", "reason": "matched"},
+            },
             "candidate_collection": {"enabled": True, "saved_total": 2, "saved_by_class": {"person": 2}},
             "model": "yolov8n",
         }
@@ -156,6 +166,8 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["detection_enabled"] is True
     assert payload["detection_model"] == "yolov8n"
     assert payload["face_recognition_enabled"] is False
+    assert payload["pet_identity_matching"]["enabled"] is True
+    assert payload["pet_identity_matching"]["pet_sample_counts"]["Dobby"] == 3
     assert payload["candidate_collection"]["saved_total"] == 2
     assert payload["app_version"]["display"] == "v0.3.0 (main@abc1234)"
 
@@ -446,6 +458,16 @@ def _make_identity_detect_ns(**overrides):
             "face_recognition_reason": None,
             "identity_labeling_enabled": True,
             "pet_labels": {},
+            "pet_identity_matching": {
+                "enabled": False,
+                "reason": "pet identity matching unavailable",
+                "pet_identity_count": 0,
+                "pet_sample_count": 0,
+                "pet_sample_counts": {},
+                "pet_class_sample_counts": {},
+                "thresholds": {},
+                "recent_match": None,
+            },
             "known_faces": [],
             "model": "yolov8n",
         },
@@ -458,6 +480,7 @@ def _make_identity_detect_ns(**overrides):
         remove_face=lambda name: (True, f"Removed '{name}'"),
         enroll_face=lambda name, data: (True, f"Enrolled '{name}'"),
         reload_faces=lambda: None,
+        reload_pet_identities=lambda: None,
         list_faces=lambda: [],
     )
     defaults.update(overrides)
@@ -519,6 +542,7 @@ def test_review_promote_identities_route_reloads_faces(monkeypatch):
     ))
     monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
         reload_faces=lambda: reload_calls.append("reload"),
+        reload_pet_identities=lambda: reload_calls.append("reload_pet"),
     ))
     app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
     client = app.test_client()
@@ -531,7 +555,7 @@ def test_review_promote_identities_route_reloads_faces(monkeypatch):
     assert payload["people_promoted"] == 2
     assert payload["pet_promoted"] == 1
     assert payload["status"]["people_encoding_count"] == 2
-    assert reload_calls == ["reload"]
+    assert reload_calls == ["reload", "reload_pet"]
 
 
 def test_identity_enroll_pet_cat(monkeypatch):

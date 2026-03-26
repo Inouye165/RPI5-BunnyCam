@@ -915,6 +915,16 @@ def _detection_status_payload():
             "face_recognition_enabled": False,
             "face_recognition_reason": "detect module unavailable",
             "identity_labeling_enabled": False,
+            "pet_identity_matching": {
+                "enabled": False,
+                "reason": "pet identity matching unavailable",
+                "pet_identity_count": 0,
+                "pet_sample_count": 0,
+                "pet_sample_counts": {},
+                "pet_class_sample_counts": {},
+                "thresholds": {},
+                "recent_match": None,
+            },
             "candidate_collection": {
                 "enabled": False,
                 "saved_total": 0,
@@ -930,6 +940,16 @@ def _detection_status_payload():
         "face_recognition_enabled": bool(detect_status.get("face_recognition_enabled", False)),
         "face_recognition_reason": detect_status.get("face_recognition_reason"),
         "identity_labeling_enabled": bool(detect_status.get("identity_labeling_enabled", False)),
+        "pet_identity_matching": detect_status.get("pet_identity_matching", {
+            "enabled": False,
+            "reason": "pet identity matching unavailable",
+            "pet_identity_count": 0,
+            "pet_sample_count": 0,
+            "pet_sample_counts": {},
+            "pet_class_sample_counts": {},
+            "thresholds": {},
+            "recent_match": None,
+        }),
         "candidate_collection": detect_status.get("candidate_collection", {
             "enabled": False,
             "saved_total": 0,
@@ -1300,6 +1320,8 @@ def review_promote_identities():
     payload = _identity_promoter.promote_approved_identities()
     if payload.get("people_promoted") and _detect is not None and hasattr(_detect, "reload_faces"):
         _detect.reload_faces()
+    if payload.get("pet_promoted") and _detect is not None and hasattr(_detect, "reload_pet_identities"):
+        _detect.reload_pet_identities()
     return jsonify({"ok": True, **_identity_gallery_payload_with_paths(payload)})
 
 
