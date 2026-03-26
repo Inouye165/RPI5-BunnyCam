@@ -13,6 +13,7 @@ from urllib.parse import quote
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from candidate_collection import encode_rgb_bmp
+from identity_gallery import ReviewedIdentityPromoter
 from reviewed_export import ReviewedDatasetExporter
 from review_queue import CandidateReviewQueue
 from version_info import get_app_version_info
@@ -820,6 +821,12 @@ app = Flask(__name__)
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 _review_queue = CandidateReviewQueue(CANDIDATE_DATA_DIR)
 _review_exporter = ReviewedDatasetExporter(CANDIDATE_DATA_DIR, EXPORT_DATA_DIR, review_queue=_review_queue)
+_identity_promoter = ReviewedIdentityPromoter(
+    CANDIDATE_DATA_DIR,
+    os.path.join(BASE_DIR, "faces"),
+    os.path.join(BASE_DIR, "data", "identity_gallery"),
+    review_queue=_review_queue,
+)
 _app_version_info = get_app_version_info(BASE_DIR)
 
 
@@ -946,6 +953,29 @@ def _review_candidate_with_urls(candidate: dict) -> dict:
 
 def _to_repo_relative_path(path: str) -> str:
     return os.path.relpath(path, BASE_DIR).replace(os.sep, "/")
+
+
+def _identity_gallery_payload_with_paths(payload: dict) -> dict:
+    rendered = dict(payload)
+    for key in ("known_people_root", "pet_gallery_root", "last_promotion_path"):
+        value = rendered.get(key)
+        if isinstance(value, str) and value:
+            rendered[key] = _to_repo_relative_path(value)
+
+    last_promotion = rendered.get("last_promotion")
+    if isinstance(last_promotion, dict):
+        nested = dict(last_promotion)
+        for key in ("known_people_root", "pet_gallery_root", "last_promotion_path"):
+            value = nested.get(key)
+            if isinstance(value, str) and value:
+                nested[key] = _to_repo_relative_path(value)
+        rendered["last_promotion"] = nested
+
+    status_payload = rendered.get("status")
+    if isinstance(status_payload, dict):
+        rendered["status"] = _identity_gallery_payload_with_paths(status_payload)
+
+    return rendered
 
 
 def _read_ppm_asset(asset_path: str) -> np.ndarray:
@@ -1257,6 +1287,20 @@ def review_export():
         "exported_count": payload["exported_count"],
         "skipped_count": payload["skipped_count"],
     })
+
+
+@app.get("/api/review/identity-gallery-status")
+def review_identity_gallery_status():
+    payload = _identity_promoter.get_status()
+    return jsonify({"ok": True, **_identity_gallery_payload_with_paths(payload)})
+
+
+@app.post("/api/review/promote-identities")
+def review_promote_identities():
+    payload = _identity_promoter.promote_approved_identities()
+    if payload.get("people_promoted") and _detect is not None and hasattr(_detect, "reload_faces"):
+        _detect.reload_faces()
+    return jsonify({"ok": True, **_identity_gallery_payload_with_paths(payload)})
 
 
 @app.get("/face/list")

@@ -152,9 +152,15 @@ Candidate collection artifacts:
 - `data/candidates/review/approved_manifest.json`: training-ready approved index
 - `data/candidates/review/rejected_manifest.json`: rejected index for exclusion
 - `data/exports/reviewed/YYYYMMDD_HHMMSS/`: versioned reviewed export bundles
+- `faces/known_people/<identity>/encodings.json`: persistent promoted multi-sample person gallery
+- `faces/known_people/<identity>/samples/`: copied approved person crops used for promotion
+- `data/identity_gallery/pets/<identity>/gallery.json`: persistent promoted pet gallery metadata
+- `data/identity_gallery/pets/<identity>/samples/`: copied approved pet crops used for future identity work
 - `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
 - `GET /review`: lightweight review and labeling queue UI
 - `GET /api/version`: app version/build metadata for UI display and diagnostics
+- `GET /api/review/identity-gallery-status`: small promoted-gallery status summary
+- `POST /api/review/promote-identities`: promote approved reviewed samples into active identity galleries
 
 Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
 
@@ -163,6 +169,15 @@ The review queue updates the existing candidate metadata in place with durable `
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
 
 Reviewed export is conservative by design: only `approved` items export. Rejected items are excluded, and labeled-but-not-approved items are not exported. Each export bundle includes copied images, copied source metadata JSON, and a training-ready `manifest.json` under `data/exports/reviewed/...`.
+
+Reviewed identity promotion is conservative by design as well:
+
+- only `approved` reviewed items are eligible
+- unlabeled items never promote
+- rejected items never promote
+- people must yield a usable face encoding to promote
+- near-duplicate person encodings are suppressed so galleries stay compact
+- pet promotion creates a durable local gallery for later work, but does not force live pet identity matching in this phase
 
 VS Code workspace helpers are also included:
 

@@ -302,6 +302,20 @@
       font-size: 12px;
       color: var(--muted);
     }
+    .promotion-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      background: #edf8f0;
+      border: 1px solid #cde7d4;
+      border-radius: 14px;
+    }
+    .promotion-strip strong {
+      font-size: 12px;
+    }
     .actions .approve { background: #edf8f0; color: var(--approve); }
     .actions .reject { background: #fff1f1; color: var(--reject); }
     .actions .save { background: #edf3ff; color: var(--accent); }
@@ -405,6 +419,12 @@
           </section>
 
           <section class="meta-panel">
+            <div class="promotion-strip">
+              <strong>Identity gallery</strong>
+              <button id="promoteBtn" type="button">Promote Approved To Identity Gallery</button>
+              <span id="promotionStatus" class="export-status">Loading current gallery status...</span>
+            </div>
+
             <div class="export-strip">
               <strong>Reviewed export</strong>
               <button id="exportBtn" type="button">Export Approved Dataset</button>
@@ -486,6 +506,8 @@
     const leaveUnreviewedBtn = document.getElementById('leaveUnreviewedBtn');
     const exportBtn = document.getElementById('exportBtn');
     const exportStatus = document.getElementById('exportStatus');
+    const promoteBtn = document.getElementById('promoteBtn');
+    const promotionStatus = document.getElementById('promotionStatus');
     const rawMetadata = document.getElementById('rawMetadata');
     const summaryTotal = document.getElementById('summaryTotal');
     const summaryUnreviewed = document.getElementById('summaryUnreviewed');
@@ -494,6 +516,28 @@
 
     let queueItems = [];
     let currentIndex = -1;
+
+    function galleryStatusText(payload) {
+      const people = `${payload.people_identity_count || 0} people / ${payload.people_encoding_count || 0} encodings`;
+      const pets = `${payload.pet_identity_count || 0} pet identities / ${payload.pet_sample_count || 0} samples`;
+      const last = payload.last_promotion
+        ? `Last promote: +${payload.last_promotion.people_promoted || 0} people, +${payload.last_promotion.pet_promoted || 0} pets.`
+        : 'No promotion triggered yet.';
+      return `${people}. ${pets}. ${last}`;
+    }
+
+    async function loadGalleryStatus() {
+      try {
+        const response = await fetch('/api/review/identity-gallery-status');
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Identity gallery status unavailable.');
+        }
+        promotionStatus.textContent = galleryStatusText(payload);
+      } catch (error) {
+        promotionStatus.textContent = error.message || 'Identity gallery status unavailable.';
+      }
+    }
 
     function currentItem() {
       return queueItems[currentIndex] || null;
@@ -692,7 +736,25 @@
       }
     });
 
+    promoteBtn.addEventListener('click', async () => {
+      promoteBtn.disabled = true;
+      promotionStatus.textContent = 'Promoting approved reviewed samples into identity galleries...';
+      try {
+        const response = await fetch('/api/review/promote-identities', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Promotion failed.');
+        }
+        promotionStatus.textContent = `Promoted ${payload.people_promoted || 0} people sample(s) and ${payload.pet_promoted || 0} pet sample(s). ${galleryStatusText(payload.status || payload)}`;
+      } catch (error) {
+        promotionStatus.textContent = error.message || 'Promotion failed.';
+      } finally {
+        promoteBtn.disabled = false;
+      }
+    });
+
     loadQueue();
+    loadGalleryStatus();
   </script>
 </body>
 </html>

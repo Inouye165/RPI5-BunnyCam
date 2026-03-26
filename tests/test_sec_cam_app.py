@@ -457,10 +457,81 @@ def _make_identity_detect_ns(**overrides):
         snapshot_enroll=lambda name, box: (True, f"Enrolled '{name}' from live frame"),
         remove_face=lambda name: (True, f"Removed '{name}'"),
         enroll_face=lambda name, data: (True, f"Enrolled '{name}'"),
+        reload_faces=lambda: None,
         list_faces=lambda: [],
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
+
+
+def test_review_identity_gallery_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_identity_promoter", types.SimpleNamespace(
+        get_status=lambda: {
+            "people_identity_count": 1,
+            "people_encoding_count": 2,
+            "people_encoding_counts": {"Ron": 2},
+            "pet_identity_count": 1,
+            "pet_sample_count": 3,
+            "pet_sample_counts": {"Dobby": 3},
+            "known_people_root": "c:/Users/inouy/RPI5-BunnyCam/faces/known_people",
+            "pet_gallery_root": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/pets",
+            "last_promotion_path": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/last_promotion.json",
+            "last_promotion": None,
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/identity-gallery-status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["people_identity_count"] == 1
+    assert payload["people_encoding_count"] == 2
+    assert payload["known_people_root"].endswith("faces/known_people")
+
+
+def test_review_promote_identities_route_reloads_faces(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    reload_calls = []
+    monkeypatch.setattr(module, "_identity_promoter", types.SimpleNamespace(
+        promote_approved_identities=lambda: {
+            "people_promoted": 2,
+            "pet_promoted": 1,
+            "people_duplicate_suppressed": 0,
+            "pet_duplicate_suppressed": 0,
+            "skipped_reasons": {},
+            "status": {
+                "people_identity_count": 1,
+                "people_encoding_count": 2,
+                "people_encoding_counts": {"Ron": 2},
+                "pet_identity_count": 1,
+                "pet_sample_count": 1,
+                "pet_sample_counts": {"Dobby": 1},
+                "known_people_root": "c:/Users/inouy/RPI5-BunnyCam/faces/known_people",
+                "pet_gallery_root": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/pets",
+                "last_promotion_path": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/last_promotion.json",
+                "last_promotion": None,
+            },
+        }
+    ))
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        reload_faces=lambda: reload_calls.append("reload"),
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/promote-identities")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["people_promoted"] == 2
+    assert payload["pet_promoted"] == 1
+    assert payload["status"]["people_encoding_count"] == 2
+    assert reload_calls == ["reload"]
 
 
 def test_identity_enroll_pet_cat(monkeypatch):
