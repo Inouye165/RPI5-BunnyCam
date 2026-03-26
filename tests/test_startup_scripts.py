@@ -30,6 +30,7 @@ def test_startup_scripts_record_runtime_state_and_lls_metadata():
     """The launcher scripts should support deterministic shutdown and LLS notes."""
     start_script = (REPO_ROOT / "bin" / "start_local.ps1").read_text(encoding="utf-8")
     stop_script = (REPO_ROOT / "bin" / "stop_local.ps1").read_text(encoding="utf-8")
+    common_script = (REPO_ROOT / "bin" / "startup_common.ps1").read_text(encoding="utf-8")
 
     assert "bunnycam-runtime.json" in start_script
     assert "bunnycam-runtime.json" in stop_script
@@ -37,3 +38,6 @@ def test_startup_scripts_record_runtime_state_and_lls_metadata():
     assert "Add-LlsNoteEntry" in stop_script
     assert "[string]$Actor = 'manual'" in start_script
     assert "[string]$Actor = 'manual'" in stop_script
+    assert "function Get-BunnyCamProcessById" in common_script
+    assert "Get-BunnyCamProcessById -ProcessId $runtimeStatePid" in stop_script
+    assert "Removed stale runtime state for PID" in stop_script

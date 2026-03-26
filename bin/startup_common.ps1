@@ -343,6 +343,30 @@ function Remove-RuntimeState {
     }
 }
 
+function Get-BunnyCamProcessById {
+    param([int]$ProcessId)
+
+    try {
+        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
+    } catch {
+        return $null
+    }
+
+    if (-not $processInfo) {
+        return $null
+    }
+
+    if ($processInfo.CommandLine -and $processInfo.CommandLine -match 'sec_cam\.py') {
+        return [pscustomobject]@{
+            ProcessId = [int]$ProcessId
+            CommandLine = $processInfo.CommandLine
+            Name = $processInfo.Name
+        }
+    }
+
+    return $null
+}
+
 function Get-BunnyCamProcessFromPort {
     param([int]$Port)
 
@@ -356,23 +380,5 @@ function Get-BunnyCamProcessFromPort {
         return $null
     }
 
-    try {
-        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
-    } catch {
-        return $null
-    }
-
-    if (-not $processInfo) {
-        return $null
-    }
-
-    if ($processInfo.CommandLine -and $processInfo.CommandLine -match 'sec_cam\.py') {
-        return [pscustomobject]@{
-            ProcessId = [int]$listener.OwningProcess
-            CommandLine = $processInfo.CommandLine
-            Name = $processInfo.Name
-        }
-    }
-
-    return $null
+    return Get-BunnyCamProcessById -ProcessId ([int]$listener.OwningProcess)
 }
