@@ -42,6 +42,20 @@ DETECT_FPS   = 2.0   # detections per second
 DETECT_CONF  = 0.40  # YOLO minimum confidence
 FACE_DIST    = 0.50  # face_recognition distance threshold (lower = stricter)
 
+# ── person-tracking tunables ───────────────────────────────────────────────────
+# IoU >= this threshold to match a new detection to an existing track.
+# 0.25 tolerates modest movement and slight pose changes at 2 fps.
+TRACK_IOU_MIN        = 0.25
+# Fallback centre-distance threshold (normalised 0–1) when IoU is too low.
+# 0.20 allows ~20 % of the frame width/height of movement between frames.
+TRACK_CDIST_MAX      = 0.20
+# Frames without a match before a track is discarded.  At 2 fps this is ~4 s.
+TRACK_MAX_MISS       = 8
+# A new face-recognition result must beat the track's best recorded distance by
+# at least this margin before we overwrite an existing confirmed identity.
+# 0.08 prevents name-flipping on small frame-to-frame distance fluctuations.
+TRACK_RELABEL_MARGIN = 0.08
+
 # COCO-80 class IDs we care about
 WATCH_CLASSES: dict[int, str] = {0: "person", 15: "cat", 16: "dog"}
 
@@ -63,6 +77,164 @@ _status: dict = {
     "face_recognition_reason": "face_recognition not loaded",
 }
 _stop         = threading.Event()
+
+
+# ── lightweight person tracker ────────────────────────────────────────────────
+
+def _iou(a: list[float], b: list[float]) -> float:
+    """Intersection-over-Union of two [x1,y1,x2,y2] normalised boxes."""
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter == 0.0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _centre_dist(a: list[float], b: list[float]) -> float:
+    """Euclidean distance between box centres (normalised coordinates)."""
+    ax = (a[0] + a[2]) / 2
+    ay = (a[1] + a[3]) / 2
+    bx = (b[0] + b[2]) / 2
+    by = (b[1] + b[3]) / 2
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+class _PersonTracker:
+    """Stateful frame-to-frame tracker for person detections only.
+
+    Each detected person is assigned a stable *track_id* that persists across
+    frames as long as the person stays in view (within TRACK_MAX_MISS misses).
+
+    Identity labels are made sticky:
+    - Once a track has a confirmed name it keeps it through frames where face
+      recognition fails to fire.
+    - A new recognition result only overwrites the name if it beats the stored
+      best face distance by TRACK_RELABEL_MARGIN — small fluctuations are
+      ignored.
+    """
+
+    def __init__(self) -> None:
+        self._next_id: int = 1
+        # Each track is a plain dict with keys:
+        #   track_id, box, label, label_source ("face"|"default"),
+        #   best_dist (lowest face distance seen), miss_count, last_seen
+        self._tracks: list[dict] = []
+
+    # ------------------------------------------------------------------
+    def update(self, person_dets: list[dict]) -> None:
+        """Match *person_dets* to existing tracks; mutate each in-place.
+
+        After this call every det will have:
+        - ``track_id``  – stable integer ID
+        - ``label``     – sticky identity label (name or "person")
+        The internal ``_face_dist`` key is consumed here and removed."""
+
+        now = time.time()
+        matched_track_ids: set[int] = set()
+        matched_det_idxs:  set[int] = set()
+
+        # ── greedy IoU matching ───────────────────────────────────────────
+        for det_i, det in enumerate(person_dets):
+            best_iou    = 0.0
+            best_track  = None
+            for track in self._tracks:
+                if track["track_id"] in matched_track_ids:
+                    continue
+                iou = _iou(det["box"], track["box"])
+                if iou > best_iou:
+                    best_iou   = iou
+                    best_track = track
+
+            if best_track is not None and best_iou >= TRACK_IOU_MIN:
+                self._merge(det, best_track, now)
+                matched_track_ids.add(best_track["track_id"])
+                matched_det_idxs.add(det_i)
+                continue
+
+            # ── centre-distance fallback ──────────────────────────────────
+            best_cdist   = float("inf")
+            best_cd_track = None
+            for track in self._tracks:
+                if track["track_id"] in matched_track_ids:
+                    continue
+                cd = _centre_dist(det["box"], track["box"])
+                if cd < best_cdist:
+                    best_cdist    = cd
+                    best_cd_track = track
+
+            if best_cd_track is not None and best_cdist <= TRACK_CDIST_MAX:
+                self._merge(det, best_cd_track, now)
+                matched_track_ids.add(best_cd_track["track_id"])
+                matched_det_idxs.add(det_i)
+                continue
+
+            # ── new track ─────────────────────────────────────────────────
+            raw_label  = det.get("label", "person")
+            raw_dist   = det.pop("_face_dist", 1.0)
+            new_track  = {
+                "track_id":     self._next_id,
+                "box":          det["box"][:],
+                "label":        raw_label,
+                "label_source": "face" if raw_label != "person" else "default",
+                "best_dist":    raw_dist if raw_label != "person" else 1.0,
+                "miss_count":   0,
+                "last_seen":    now,
+            }
+            self._next_id += 1
+            self._tracks.append(new_track)
+            det["track_id"] = new_track["track_id"]
+            matched_det_idxs.add(det_i)
+
+        # ── age unmatched tracks ──────────────────────────────────────────
+        for track in self._tracks:
+            if track["track_id"] not in matched_track_ids:
+                track["miss_count"] += 1
+
+        # ── prune expired tracks ──────────────────────────────────────────
+        self._tracks = [t for t in self._tracks if t["miss_count"] <= TRACK_MAX_MISS]
+
+    # ------------------------------------------------------------------
+    def _merge(self, det: dict, track: dict, now: float) -> None:
+        """Update *track* position + label from a matched *det*."""
+        track["box"]        = det["box"][:]
+        track["miss_count"] = 0
+        track["last_seen"]  = now
+
+        new_label = det.get("label", "person")
+        new_dist  = det.pop("_face_dist", 1.0)
+
+        if new_label != "person":
+            # Face recognition fired this frame.
+            if track["label_source"] == "default":
+                # First confirmed name — accept immediately.
+                track["label"]        = new_label
+                track["label_source"] = "face"
+                track["best_dist"]    = new_dist
+            elif new_dist < track["best_dist"] - TRACK_RELABEL_MARGIN:
+                # Clearly better match — allow relabel.
+                track["label"]     = new_label
+                track["best_dist"] = new_dist
+            # else: keep current sticky label (ignore small fluctuations)
+
+        # Always propagate current track label to the detection dict.
+        det["label"]    = track["label"]
+        det["track_id"] = track["track_id"]
+
+    # ------------------------------------------------------------------
+    def reset(self) -> None:
+        """Clear all tracks (useful for tests or future reset hooks)."""
+        self._tracks.clear()
+        self._next_id = 1
+
+
+# Module-level tracker instance — lives for the lifetime of the process.
+_tracker = _PersonTracker()
 
 
 # ── model / face loading ──────────────────────────────────────────────────────
@@ -206,43 +378,52 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     # ── face recognition ──────────────────────────────────────────────────────────────
     fr = _models["fr"]
     person_dets = [d for d in dets if d["class"] == "person"]
-    if not person_dets or fr is None:
-        return dets
 
-    with _lock:
-        k_names = list(_known_names)
-        k_encs  = list(_known_encs)
-    if not k_encs:
-        return dets
+    if person_dets and fr is not None:
+        with _lock:
+            k_names = list(_known_names)
+            k_encs  = list(_known_encs)
 
-    try:
-        fh, fw   = frame_rgb.shape[:2]
-        face_locs = fr.face_locations(frame_rgb, model="hog")
-        if not face_locs:
-            return dets
-        face_encs = fr.face_encodings(frame_rgb, face_locs)
+        if k_encs:
+            try:
+                fh, fw    = frame_rgb.shape[:2]
+                face_locs = fr.face_locations(frame_rgb, model="hog")
+                if face_locs:
+                    face_encs = fr.face_encodings(frame_rgb, face_locs)
 
-        for face_idx, face_enc in enumerate(face_encs):
-            dists  = fr.face_distance(k_encs, face_enc)
-            best_i = int(np.argmin(dists))
-            if dists[best_i] >= FACE_DIST:
-                continue
-            name = k_names[best_i]
+                    for face_idx, face_enc in enumerate(face_encs):
+                        dists  = fr.face_distance(k_encs, face_enc)
+                        best_i = int(np.argmin(dists))
+                        if dists[best_i] >= FACE_DIST:
+                            continue
+                        name = k_names[best_i]
 
-            # Find the person bounding box whose centre is closest to this face
-            top, right, bottom, left = face_locs[face_idx]
-            face_cx = (left + right) / 2 / fw
-            face_cy = (top + bottom) / 2 / fh
-            nearest = min(
-                person_dets,
-                key=lambda d, cx=face_cx, cy=face_cy:
-                    ((d["box"][0] + d["box"][2]) / 2 - cx) ** 2
-                    + ((d["box"][1] + d["box"][3]) / 2 - cy) ** 2,
-            )
-            nearest["label"] = name
+                        # Find the person bounding box whose centre is closest to this face
+                        top, right, bottom, left = face_locs[face_idx]
+                        face_cx = (left + right) / 2 / fw
+                        face_cy = (top + bottom) / 2 / fh
+                        nearest = min(
+                            person_dets,
+                            key=lambda d, cx=face_cx, cy=face_cy:
+                                ((d["box"][0] + d["box"][2]) / 2 - cx) ** 2
+                                + ((d["box"][1] + d["box"][3]) / 2 - cy) ** 2,
+                        )
+                        nearest["label"]      = name
+                        # Store recognition distance for tracker hysteresis.
+                        # Consumed + stripped by _tracker.update() below.
+                        nearest["_face_dist"] = float(dists[best_i])
 
-    except (RuntimeError, ValueError, OSError) as exc:
-        logger.debug("detect: face recognition error — %s", exc)
+            except (RuntimeError, ValueError, OSError) as exc:
+                logger.debug("detect: face recognition error — %s", exc)
+
+    # ── tracker: assign stable track_ids + sticky identity labels ─────────────
+    # Called for every frame regardless of whether face recognition fired,
+    # so that sticky labels survive frames with no face match.
+    _tracker.update(person_dets)
+
+    # Strip any remaining internal key (safety net).
+    for d in person_dets:
+        d.pop("_face_dist", None)
 
     return dets
 
