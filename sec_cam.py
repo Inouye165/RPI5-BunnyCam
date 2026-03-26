@@ -13,7 +13,9 @@ from urllib.parse import quote
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from candidate_collection import encode_rgb_bmp
+from reviewed_export import ReviewedDatasetExporter
 from review_queue import CandidateReviewQueue
+from version_info import get_app_version_info
 
 # --------------------
 # Paths
@@ -70,6 +72,7 @@ SNAPSHOT_DIR = os.path.join(BASE_DIR, "snapshots")
 RECORD_DIR_H264 = os.path.join(BASE_DIR, "recordings")        # temp/raw segments
 RECORD_DIR_MP4 = os.path.join(BASE_DIR, "recordings_mp4")     # browser-playable segments
 CANDIDATE_DATA_DIR = os.path.join(BASE_DIR, "data", "candidates")
+EXPORT_DATA_DIR = os.path.join(BASE_DIR, "data", "exports")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(RECORD_DIR_H264, exist_ok=True)
 os.makedirs(RECORD_DIR_MP4, exist_ok=True)
@@ -816,6 +819,8 @@ app = Flask(__name__)
 
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 _review_queue = CandidateReviewQueue(CANDIDATE_DATA_DIR)
+_review_exporter = ReviewedDatasetExporter(CANDIDATE_DATA_DIR, EXPORT_DATA_DIR, review_queue=_review_queue)
+_app_version_info = get_app_version_info(BASE_DIR)
 
 
 def _load_template(name: str) -> str:
@@ -828,14 +833,18 @@ INDEX_HTML = _load_template("index.html")
 REVIEW_HTML = _load_template("review.html")
 
 
+def _render_html(template_text: str) -> str:
+    return template_text.replace("__APP_VERSION__", _app_version_info["display"])
+
+
 @app.get("/")
 def index():
-    return INDEX_HTML
+    return _render_html(INDEX_HTML)
 
 
 @app.get("/review")
 def review_page():
-    return REVIEW_HTML
+    return _render_html(REVIEW_HTML)
 
 
 @app.get("/favicon.svg")
@@ -872,8 +881,14 @@ def status():
         payload = dict(motion_state)
     payload["backend"] = _selected_backend_name()
     payload["runtime_initialized"] = runtime_state["runtime_initialized"]
+    payload["app_version"] = dict(_app_version_info)
     payload.update(_detection_status_payload())
     return jsonify(payload)
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify(dict(_app_version_info))
 
 
 def _selected_backend_name():
@@ -927,6 +942,10 @@ def _review_candidate_with_urls(candidate: dict) -> dict:
         f"/candidate-collection/assets/{quote(str(frame_path), safe='/')}" if frame_path else None
     )
     return payload
+
+
+def _to_repo_relative_path(path: str) -> str:
+    return os.path.relpath(path, BASE_DIR).replace(os.sep, "/")
 
 
 def _read_ppm_asset(asset_path: str) -> np.ndarray:
@@ -1225,6 +1244,19 @@ def review_candidate_update(candidate_id):
         return jsonify({"ok": False, "error": str(exc)}), 400
 
     return jsonify({"ok": True, "candidate": _review_candidate_with_urls(payload)})
+
+
+@app.post("/api/review/export")
+def review_export():
+    payload = _review_exporter.export_reviewed_dataset(version_info=dict(_app_version_info))
+    return jsonify({
+        "ok": True,
+        "export_name": payload["export_name"],
+        "export_path": _to_repo_relative_path(payload["export_path"]),
+        "manifest_path": _to_repo_relative_path(payload["manifest_path"]),
+        "exported_count": payload["exported_count"],
+        "skipped_count": payload["skipped_count"],
+    })
 
 
 @app.get("/face/list")

@@ -61,6 +61,25 @@
       padding: 8px 12px;
       background: var(--panel);
     }
+    .header-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .version-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
     .content {
       display: grid;
       grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
@@ -265,6 +284,24 @@
       flex-wrap: wrap;
       gap: 8px;
     }
+    .export-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      background: #edf3ff;
+      border: 1px solid #cbd9ff;
+      border-radius: 14px;
+    }
+    .export-strip strong {
+      font-size: 12px;
+    }
+    .export-status {
+      font-size: 12px;
+      color: var(--muted);
+    }
     .actions .approve { background: #edf8f0; color: var(--approve); }
     .actions .reject { background: #fff1f1; color: var(--reject); }
     .actions .save { background: #edf3ff; color: var(--accent); }
@@ -304,7 +341,10 @@
         <h1>Candidate Review Queue</h1>
         <p>Review, label, approve, or reject Phase 1 candidate crops without leaving BunnyCam.</p>
       </div>
-      <a href="/">Back To Live View</a>
+      <div class="header-tools">
+        <span class="version-pill">__APP_VERSION__</span>
+        <a href="/">Back To Live View</a>
+      </div>
     </header>
 
     <div class="content">
@@ -365,6 +405,12 @@
           </section>
 
           <section class="meta-panel">
+            <div class="export-strip">
+              <strong>Reviewed export</strong>
+              <button id="exportBtn" type="button">Export Approved Dataset</button>
+              <span id="exportStatus" class="export-status">No export triggered yet.</span>
+            </div>
+
             <div class="meta-grid">
               <div class="meta-card"><span>Candidate</span><strong id="metaCandidateId">-</strong></div>
               <div class="meta-card"><span>Captured</span><strong id="metaTimestamp">-</strong></div>
@@ -438,6 +484,8 @@
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
     const leaveUnreviewedBtn = document.getElementById('leaveUnreviewedBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const exportStatus = document.getElementById('exportStatus');
     const rawMetadata = document.getElementById('rawMetadata');
     const summaryTotal = document.getElementById('summaryTotal');
     const summaryUnreviewed = document.getElementById('summaryUnreviewed');
@@ -626,6 +674,22 @@
     clearLabelBtn.addEventListener('click', () => {
       identityLabelInput.value = '';
       updateCurrent({ identity_label: '', corrected_class_name: classCorrectionSelect.value }, 'stay');
+    });
+    exportBtn.addEventListener('click', async () => {
+      exportBtn.disabled = true;
+      exportStatus.textContent = 'Exporting approved dataset...';
+      try {
+        const response = await fetch('/api/review/export', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Export failed.');
+        }
+        exportStatus.textContent = `Exported ${payload.exported_count} item(s) to ${payload.export_path}`;
+      } catch (error) {
+        exportStatus.textContent = error.message || 'Export failed.';
+      } finally {
+        exportBtn.disabled = false;
+      }
     });
 
     loadQueue();

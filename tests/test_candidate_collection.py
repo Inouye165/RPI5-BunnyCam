@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from candidate_collection import CandidateCollector, CandidateCollectorConfig
+from reviewed_export import ReviewedDatasetExporter
 from review_queue import CandidateReviewQueue
 
 
@@ -53,6 +54,12 @@ def _metadata_files(tmp_path: Path) -> list[Path]:
 
 def _review_queue(tmp_path: Path) -> CandidateReviewQueue:
     return CandidateReviewQueue(str(tmp_path / "data" / "candidates"))
+
+
+def _exporter(tmp_path: Path) -> ReviewedDatasetExporter:
+    candidate_root = str(tmp_path / "data" / "candidates")
+    export_root = str(tmp_path / "data" / "exports")
+    return ReviewedDatasetExporter(candidate_root, export_root, review_queue=_review_queue(tmp_path))
 
 
 def test_candidate_collection_saves_first_good_sample_for_stable_track(tmp_path):
@@ -206,3 +213,60 @@ def test_review_queue_filters_by_state_and_class(tmp_path):
     assert approved_people["items"][0]["candidate_id"] == person["candidate_id"]
     assert rejected_dogs["total"] == 1
     assert rejected_dogs["items"][0]["candidate_id"] == dog["candidate_id"]
+
+
+def test_reviewed_export_only_includes_approved_items(tmp_path):
+    collector = _collector(tmp_path)
+    approved = collector.collect(_frame(), [_detection(class_name="person", track_id=31)], captured_at=100.0)[0]
+    rejected = collector.collect(_frame(), [_detection(class_name="dog", track_id=32)], captured_at=200.0)[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(approved["candidate_id"], review_state="approved", identity_label="Ron")
+    queue.update_candidate(rejected["candidate_id"], review_state="rejected", identity_label="Dobby")
+
+    export_payload = _exporter(tmp_path).export_reviewed_dataset(export_stamp="20260326_063500")
+    manifest_path = Path(export_payload["manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert export_payload["exported_count"] == 1
+    assert export_payload["skipped_count"] == 0
+    assert manifest["export_rule"] == "approved_only"
+    assert manifest["items"][0]["candidate_id"] == approved["candidate_id"]
+    assert rejected["candidate_id"] not in json.dumps(manifest)
+
+
+def test_reviewed_export_manifest_contains_expected_fields(tmp_path):
+    collector = _collector(tmp_path)
+    approved = collector.collect(_frame(), [_detection(class_name="dog", track_id=33, label="dog")], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(approved["candidate_id"], review_state="approved", identity_label="Dobby", corrected_class_name="dog")
+
+    export_payload = _exporter(tmp_path).export_reviewed_dataset(
+        export_stamp="20260326_063510",
+        version_info={"version": "0.3.0", "display": "v0.3.0 (test@abc1234)"},
+    )
+    manifest = json.loads(Path(export_payload["manifest_path"]).read_text(encoding="utf-8"))
+    item = manifest["items"][0]
+
+    assert manifest["version"]["version"] == "0.3.0"
+    assert item["class_name"] == "dog"
+    assert item["effective_class_name"] == "dog"
+    assert item["identity_label"] == "Dobby"
+    assert item["review_state"] == "approved"
+    assert item["image_path"].startswith("images/dog/dobby/")
+    assert item["metadata_path"].startswith("metadata/")
+    assert (Path(export_payload["export_path"]) / item["image_path"]).exists()
+    assert (Path(export_payload["export_path"]) / item["metadata_path"]).exists()
+
+
+def test_reviewed_export_output_path_is_versioned(tmp_path):
+    collector = _collector(tmp_path)
+    approved = collector.collect(_frame(), [_detection(class_name="person", track_id=34)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(approved["candidate_id"], review_state="approved")
+    exporter = _exporter(tmp_path)
+
+    first = exporter.export_reviewed_dataset(export_stamp="20260326_063520")
+    second = exporter.export_reviewed_dataset(export_stamp="20260326_063520")
+
+    assert Path(first["export_path"]).name == "20260326_063520"
+    assert Path(second["export_path"]).name == "20260326_063520_01"
