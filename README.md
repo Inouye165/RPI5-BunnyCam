@@ -12,6 +12,7 @@ Primary capabilities:
 - Motion detection using a low-resolution analysis stream
 - Snapshot capture on motion events
 - Rolling H.264 recording with MP4 conversion for playback
+- Conservative candidate image collection for stable person, dog, and cat tracks
 - Browser controls for ROI selection, sensitivity, and rotation
 - Camera Module 3 autofocus support when the connected camera exposes libcamera autofocus controls
 
@@ -143,6 +144,14 @@ Runtime artifacts:
 - `logs/bunnycam-runtime.json`: latest managed runtime PID and endpoint details for shutdown
 - `logs/bunnycam-start.stdout.log`: latest process stdout
 - `logs/bunnycam-start.stderr.log`: latest process stderr
+
+Candidate collection artifacts:
+
+- `data/candidates/images/YYYY/MM/DD/`: saved candidate crops
+- `data/candidates/metadata/YYYY/MM/DD/`: per-candidate JSON metadata
+- `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
+
+Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
 
 VS Code workspace helpers are also included:
 

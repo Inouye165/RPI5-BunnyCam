@@ -135,6 +135,7 @@ def test_status_route_includes_detection_state(monkeypatch):
             "detection_reason": None,
             "face_recognition_enabled": False,
             "face_recognition_reason": "face_recognition not installed",
+            "candidate_collection": {"enabled": True, "saved_total": 2, "saved_by_class": {"person": 2}},
             "model": "yolov8n",
         }
     ))
@@ -149,6 +150,36 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["detection_enabled"] is True
     assert payload["detection_model"] == "yolov8n"
     assert payload["face_recognition_enabled"] is False
+    assert payload["candidate_collection"]["saved_total"] == 2
+
+
+def test_candidate_collection_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_detect", types.SimpleNamespace(
+        get_status=lambda: {
+            "detection_enabled": True,
+            "detection_reason": None,
+            "face_recognition_enabled": False,
+            "face_recognition_reason": None,
+            "identity_labeling_enabled": True,
+            "candidate_collection": {
+                "enabled": True,
+                "saved_total": 4,
+                "saved_by_class": {"person": 2, "cat": 1, "dog": 1},
+            },
+            "model": "yolov8n",
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/candidate-collection/status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["enabled"] is True
+    assert payload["saved_total"] == 4
+    assert payload["saved_by_class"]["dog"] == 1
 
 
 def test_detections_when_detect_module_unavailable(monkeypatch):
