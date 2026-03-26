@@ -20,6 +20,7 @@ snapshots/
 .envrc
 .venv/
 venv/
+logs/
 .idea/
 .vscode/
 *.code-workspace

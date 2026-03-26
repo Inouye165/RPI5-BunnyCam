@@ -70,9 +70,16 @@ CAMERA_BACKEND=laptop python sec_cam.py
 Recommended Windows local startup from the repo root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
 .\start_local.ps1
 ```
+
+That path now handles the full local startup flow:
+
+- verifies or installs `requirements.txt`
+- starts `sec_cam.py` in the background
+- checks `http://127.0.0.1:8001/status` until healthy
+- monitors the process briefly for early crash behavior
+- appends a timestamped result entry with hostname to `STARTUP_RESULTS.md`
 
 That path starts the laptop camera backend on `http://127.0.0.1:8001/`.
 
@@ -91,6 +98,19 @@ bin\start_local.cmd
 ```
 
 Both default to `CAMERA_BACKEND=laptop`, `BUNNYCAM_PORT=8001`, and `BUNNYCAM_HOST=127.0.0.1`, while still allowing any of those environment variables to be overridden.
+
+Useful switches for the PowerShell launcher:
+
+```powershell
+.\start_local.ps1 -SkipInstall
+.\start_local.ps1 -StartupTimeoutSec 90 -PostStartMonitorSec 30
+```
+
+Runtime artifacts:
+
+- `STARTUP_RESULTS.md`: tracked markdown history of startup success and failure across devices
+- `logs/bunnycam-start.stdout.log`: latest process stdout
+- `logs/bunnycam-start.stderr.log`: latest process stderr
 
 VS Code workspace helpers are also included:
 

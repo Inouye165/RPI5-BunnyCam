@@ -1148,13 +1148,20 @@ def identity_enroll():
     if not box or not isinstance(box, list) or len(box) != 4:
         return jsonify({"ok": False, "error": "box required (4 floats)"}), 400
 
-    if category in ("cat", "dog"):
-        ok, msg = _detect.set_pet_label(category, name)
-    elif category == "person":
-        ok, msg = _detect.snapshot_enroll(name, box)
-    else:
-        return jsonify({"ok": False,
-                        "error": f"unsupported category '{category}'"}), 400
+    try:
+        if category in ("cat", "dog"):
+            ok, msg = _detect.set_pet_label(category, name)
+        elif category == "person":
+            ok, msg = _detect.snapshot_enroll(name, box)
+        else:
+            return jsonify({"ok": False,
+                            "error": f"unsupported category '{category}'"}), 400
+    except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
+        logger.exception("identity enrollment failed for category '%s'", category)
+        return jsonify({
+            "ok": False,
+            "error": f"live enrollment failed: {exc}",
+        }), 500
 
     if ok:
         return jsonify({"ok": True, "message": msg})
@@ -1167,10 +1174,10 @@ def identity_labels():
     if _detect is None:
         return jsonify({"faces": [], "pets": {},
                         "identity_labeling_enabled": False})
-    status = _detect.get_status()
+    detect_status = _detect.get_status()
     return jsonify({
-        "faces": status.get("known_faces", []),
-        "pets": status.get("pet_labels", {}),
+        "faces": detect_status.get("known_faces", []),
+        "pets": detect_status.get("pet_labels", {}),
         "identity_labeling_enabled": True,
     })
 
