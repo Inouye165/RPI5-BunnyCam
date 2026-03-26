@@ -115,6 +115,34 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: BunnyCam started successfully and passed the monitor window.
 - Managed Components: BunnyCam Python web process
 - Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-26 13:15:36 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-26 13:15:36
+- Hostname: Rons-Computer
+- Actor: LLS
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 32312
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-26 13:22:46 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-26 13:22:46
+- Hostname: Rons-Computer
+- Actor: LLS
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 9636
+- Summary: Endpoint already healthy; no new process started.
+- Managed Components: BunnyCam Python web process
+- Details: Endpoint already healthy; no new process started.
 <!-- STARTUP_RUN_HISTORY_END -->
 
 ## LLS Session Notes
@@ -143,7 +171,31 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Issue: Final validation run after adding one-command startup and shutdown logging.
 - Fix: Restarted BunnyCam with the new launcher so the repo is left in the intended running state.
 - Note: Final LLS-managed startup; application should remain available on http://127.0.0.1:8001/.
+### 2026-03-26 13:15:36 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-26 13:15:36
+- Hostname: Rons-Computer
+- Actor: LLS
+- Issue: Requested startup validation, runtime monitoring, and hardening review.
+- Fix: Executed the script-managed launch path and monitored health/log output to confirm runtime behavior.
+- Note: Starting BunnyCam under LLS supervision for a fresh monitored run.
+### 2026-03-26 13:22:46 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-26 13:22:46
+- Hostname: Rons-Computer
+- Actor: LLS
+- Issue: Shutdown safety review found that a stale runtime-state PID could be trusted without re-validating the owning process.
+- Fix: Hardened stop_local.ps1 to verify the runtime-state PID still belongs to sec_cam.py, fall back to the port listener when needed, and remove stale runtime state when no BunnyCam process remains.
+- Note: Post-hardening validation passed via pytest and the app remained healthy on http://127.0.0.1:8001/.
 <!-- STARTUP_LLS_NOTES_END -->
+
+
+
+
+
+
+
+
 
 
 

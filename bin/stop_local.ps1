@@ -45,9 +45,14 @@ Set-ResultsFileSections -Path $resultsPath -LifecycleLines $lifecycleLines -Vers
 
 $runtimeState = Read-RuntimeState -Path $runtimeStatePath
 $processId = $null
+$runtimeStatePid = $null
 
 if ($runtimeState -and $runtimeState.process_id) {
-    $processId = [int]$runtimeState.process_id
+    $runtimeStatePid = [int]$runtimeState.process_id
+    $runtimeStateProcess = Get-BunnyCamProcessById -ProcessId $runtimeStatePid
+    if ($runtimeStateProcess) {
+        $processId = [int]$runtimeStateProcess.ProcessId
+    }
 }
 
 if ($null -eq $processId) {
@@ -58,8 +63,14 @@ if ($null -eq $processId) {
 }
 
 if ($null -eq $processId) {
+    $details = 'No BunnyCam process was found to stop.'
+    if ($null -ne $runtimeStatePid) {
+        Remove-RuntimeState -Path $runtimeStatePath
+        $details = "No BunnyCam process was found to stop. Removed stale runtime state for PID $runtimeStatePid."
+    }
+
     $summary = 'No BunnyCam process was found to stop.'
-    Add-ResultsEntry -Path $resultsPath -Action 'stop' -Outcome 'failure' -Details $summary -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $null -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
+    Add-ResultsEntry -Path $resultsPath -Action 'stop' -Outcome 'failure' -Details $details -Url $rootUrl -Backend $backend -BindHost $bindHost -Port $port -ProcessId $null -StatusSummary $summary -Actor $Actor -ManagedComponents $managedComponents
     Add-LlsNoteEntry -Path $resultsPath -Actor $Actor -Issue $Issue -Fix $Fix -Note $Note
     throw $summary
 }
