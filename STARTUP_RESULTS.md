@@ -3,6 +3,15 @@
 This file is maintained by the startup and shutdown scripts.
 It records lifecycle commands, required component versions, run outcomes, and LLS issue/fix/note entries.
 
+## Guide
+- Use the startup script listed in Lifecycle Commands to start BunnyCam.
+- Monitor startup until the app is healthy or fails.
+- Record every startup result in Run History with a date/time stamp.
+- If startup fails, log the reason, fix the cause, and rerun the startup check.
+- Keep the newest Run History entry at the top of the section.
+- Keep the newest LLS Session Notes entry at the top of that section as well.
+- Follow this pattern consistently so the monitoring LLM behaves the same way on every run.
+
 ## Lifecycle Commands
 <!-- STARTUP_COMMANDS_BEGIN -->
 - Start command: .\start_local.ps1
@@ -29,6 +38,63 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Run History
 <!-- STARTUP_RUN_HISTORY_BEGIN -->
+### 2026-03-27 08:44:29 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 08:44:29
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 39672
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-27 08:43:53 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-27 08:43:53
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 19620
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 19620 and removed runtime state.
+### 2026-03-27 08:04:13 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 08:04:13
+- Hostname: Rons-Computer
+- Actor: LLS
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 19620
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-27 07:03:25 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 07:03:25
+- Hostname: Rons-Computer
+- Actor: LLS
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 22748
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+
 ### 2026-03-26 07:24:36 | Rons-Computer | start | success
 
 - Timestamp: 2026-03-26 07:24:36
@@ -161,6 +227,23 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## LLS Session Notes
 <!-- STARTUP_LLS_NOTES_BEGIN -->
+### 2026-03-27 08:04:14 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-27 08:04:14
+- Hostname: Rons-Computer
+- Actor: LLS
+- Issue: Requested startup validation and logging review.
+- Fix: Used the standard launcher and monitored /status for health.
+- Note: Keeping the startup log format consistent.
+### 2026-03-27 07:03:25 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-27 07:03:25
+- Hostname: Rons-Computer
+- Actor: LLS
+- Issue: Requested startup validation and monitoring.
+- Fix: Ran the standard startup script and monitored the startup window for health or failure.
+- Note: Follow the guide instructions consistently: launch via the startup script, timestamp the result, and keep the latest entry at the top.
+
 ### 2026-03-26 09:42:23 | Rons-Computer | LLS
 
 - Timestamp: 2026-03-26 09:42:23
@@ -249,3 +332,41 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: BunnyCam started successfully on Pi backend and processed candidate captures.
 - Managed Components: BunnyCam Python web process
 - Details: /status endpoint should report runtime_initialized=True and backend=pi.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
