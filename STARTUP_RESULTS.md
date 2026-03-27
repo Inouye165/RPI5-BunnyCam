@@ -235,3 +235,17 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 
 
+### 2026-03-27 06:02:58 | raspberrypi | start | success
+
+- Timestamp: 2026-03-27 06:02:58
+- Hostname: raspberrypi
+- Actor: manual
+- Action: start
+- Backend: pi
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 398749
+- Summary: BunnyCam started successfully on Pi backend and processed candidate captures.
+- Managed Components: BunnyCam Python web process
+- Details: /status endpoint should report runtime_initialized=True and backend=pi.
