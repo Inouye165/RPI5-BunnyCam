@@ -346,6 +346,7 @@ let lastBuzzMs = 0;
 const BUZZ_COOLDOWN_MS = 900;
 
 let roiNorm = null;
+let focusTargetNorm = null;
 
 const tabLive = document.getElementById('tabLive');
 const tabPlay = document.getElementById('tabPlay');
@@ -614,6 +615,7 @@ function setFocusStatus(text, state) {
 }
 
 function drawFocusTarget(norm) {
+  focusTargetNorm = norm || null;
     if (!norm) {
         focusBox.style.display = 'none';
         return;
@@ -972,6 +974,10 @@ function detColor(label, cls) {
 let lastDetections = [];
 let selectedDetIdx = -1;
 let selectedDet = null;  // snapshot of the selected detection
+const enrollModalState = {
+  open: false,
+  selectedDet: null,
+};
 const selectedBanner = document.getElementById('selectedBanner');
 const selLabel = document.getElementById('selLabel');
 const selHint = document.getElementById('selHint');
@@ -979,14 +985,33 @@ const nameSelectedBtn = document.getElementById('nameSelectedBtn');
 const clearSelBtn = document.getElementById('clearSelBtn');
 let focusSupported = false;  // set from loadConfig
 
+function syncDetectCanvasSize(force = false) {
+  const w = Math.round(detectCanvas.offsetWidth);
+  const h = Math.round(detectCanvas.offsetHeight);
+  if (!w || !h) return false;
+  if (force || detectCanvas.width !== w || detectCanvas.height !== h) {
+    detectCanvas.width = w;
+    detectCanvas.height = h;
+  }
+  return true;
+}
+
+function refreshLiveOverlayLayout(force = false) {
+  const resized = syncDetectCanvasSize(force);
+  drawRoi(roiNorm);
+  drawFocusTarget(focusTargetNorm);
+  if (resized || force) {
+    drawDetections(lastDetections);
+  }
+}
+
 function drawDetections(dets) {
-  const w = detectCanvas.offsetWidth;
-  const h = detectCanvas.offsetHeight;
-  if (!w || !h) return;
-  detectCanvas.width  = w;
-  detectCanvas.height = h;
+  if (!syncDetectCanvasSize()) return;
+  const w = detectCanvas.width;
+  const h = detectCanvas.height;
   detectCtx.clearRect(0, 0, w, h);
   detectCtx.font = 'bold 13px sans-serif';
+  let selectedDrawn = false;
   for (let i = 0; i < dets.length; i++) {
     const d = dets[i];
     const col = detColor(d.label, d.class);
@@ -998,6 +1023,7 @@ function drawDetections(dets) {
       detectCtx.strokeStyle = '#FFD600';
       detectCtx.lineWidth   = 4;
       detectCtx.strokeRect(bx - 2, by - 2, bw + 4, bh + 4);
+      selectedDrawn = true;
     }
 
     detectCtx.strokeStyle = col;
@@ -1021,6 +1047,20 @@ function drawDetections(dets) {
     detectCtx.globalAlpha = 1;
     detectCtx.fillStyle   = '#fff';
     detectCtx.fillText(txt, bx + 5, ty + 14);
+  }
+
+  if (!selectedDrawn && enrollModalState.open && enrollModalState.selectedDet) {
+    const [x1, y1, x2, y2] = enrollModalState.selectedDet.box;
+    const bx = x1 * w;
+    const by = y1 * h;
+    const bw = (x2 - x1) * w;
+    const bh = (y2 - y1) * h;
+    detectCtx.save();
+    detectCtx.strokeStyle = '#FFD600';
+    detectCtx.lineWidth = 3;
+    detectCtx.setLineDash([8, 6]);
+    detectCtx.strokeRect(bx - 2, by - 2, bw + 4, bh + 4);
+    detectCtx.restore();
   }
 }
 
@@ -1059,6 +1099,7 @@ function selectDetection(idx) {
 function clearSelection() {
   selectedDetIdx = -1;
   selectedDet = null;
+  enrollModalState.selectedDet = null;
   selectedBanner.style.display = 'none';
   selLabel.textContent = 'No box selected';
   selHint.textContent = 'Click a detected box in the live view to select it';
@@ -1073,6 +1114,8 @@ clearSelBtn.addEventListener('click', clearSelection);
 
 function showEnrollModal(det, idx) {
   selectedDetIdx = idx;
+  enrollModalState.open = true;
+  enrollModalState.selectedDet = { ...det, box: [...det.box] };
   drawDetections(lastDetections);
 
   const overlay = document.createElement('div');
@@ -1099,6 +1142,8 @@ function showEnrollModal(det, idx) {
   const cancelBtn = overlay.querySelector('.btn-cancel');
 
   function close() {
+    enrollModalState.open = false;
+    enrollModalState.selectedDet = null;
     clearSelection();
     overlay.remove();
   }
@@ -1177,9 +1222,14 @@ async function pollDetections({ signal } = {}) {
     if (found >= 0) {
       selectedDetIdx = found;
       selectedDet = { ...dets[found], box: [...dets[found].box] };
+      if (enrollModalState.open) {
+        enrollModalState.selectedDet = { ...dets[found], box: [...dets[found].box] };
+      }
       selLabel.textContent = 'Selected: ' + dets[found].label + ' (' + Math.round(dets[found].conf * 100) + '%)';
-    } else {
+    } else if (!enrollModalState.open) {
       clearSelection();
+    } else {
+      selectedDetIdx = -1;
     }
   }
 
@@ -1193,6 +1243,13 @@ async function pollDetections({ signal } = {}) {
     detectSeen.textContent = 'nothing detected';
     detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
   }
+}
+
+window.addEventListener('resize', () => refreshLiveOverlayLayout(true));
+cam.addEventListener('load', () => refreshLiveOverlayLayout(true));
+if (window.ResizeObserver) {
+  const overlayResizeObserver = new ResizeObserver(() => refreshLiveOverlayLayout(true));
+  overlayResizeObserver.observe(wrap);
 }
 
 async function enrollFace(evt) {

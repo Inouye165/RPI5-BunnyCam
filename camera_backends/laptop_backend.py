@@ -12,8 +12,8 @@ class LaptopCameraBackend(CameraBackend):
     supports_recording = False
     supports_rotation = True
 
-    def __init__(self, stream_output, camera_index: int = 0):
-        super().__init__(stream_output=stream_output)
+    def __init__(self, stream_output, camera_index: int = 0, **kwargs):
+        super().__init__(stream_output=stream_output, **kwargs)
         self.camera_index = camera_index
         self._capture = None
         self._cv2 = None
@@ -58,6 +58,23 @@ class LaptopCameraBackend(CameraBackend):
             return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return frame_bgr
 
+    def _prepare_preview_frame(self, frame_bgr):
+        cv2 = self._cv2
+        preview_size = self.preview_stream_size or self._main_size
+        frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
+        if frame_size == preview_size:
+            return frame_bgr
+        return cv2.resize(frame_bgr, preview_size)
+
+    def _encode_preview_frame(self, frame_bgr):
+        cv2 = self._cv2
+        preview_bgr = self._prepare_preview_frame(frame_bgr)
+        return cv2.imencode(
+            ".jpg",
+            preview_bgr,
+            [int(cv2.IMWRITE_JPEG_QUALITY), self.preview_jpeg_quality],
+        )
+
     def _capture_loop(self) -> None:
         cv2 = self._cv2
         assert cv2 is not None
@@ -69,15 +86,10 @@ class LaptopCameraBackend(CameraBackend):
                 continue
 
             frame_bgr = self._rotate_bgr(frame_bgr)
-            main_bgr = cv2.resize(frame_bgr, self._main_size)
             lores_bgr = cv2.resize(frame_bgr, self._lores_size)
             lores_rgb = cv2.cvtColor(lores_bgr, cv2.COLOR_BGR2RGB)
 
-            ok, encoded = cv2.imencode(
-                ".jpg",
-                main_bgr,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 85],
-            )
+            ok, encoded = self._encode_preview_frame(frame_bgr)
             if ok:
                 self.stream_output.write(encoded.tobytes())
 

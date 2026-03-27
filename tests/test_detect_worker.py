@@ -62,3 +62,45 @@ def test_detect_worker_start_stop_and_restart(monkeypatch):
 
     assert len(calls) > first_count
     detect_module.stop(timeout=1.0)
+
+
+def test_snapshot_enroll_uses_contiguous_face_crop(monkeypatch, tmp_path):
+    detect_module = _import_detect_module()
+    detect_module.stop()
+    detect_module._known_names.clear()
+    detect_module._known_encs.clear()
+    monkeypatch.setattr(detect_module, "FACES_DIR", str(tmp_path))
+
+    frame = np.zeros((24, 24, 3), dtype=np.uint8)
+    detect_module._frame_state["latest_frame"] = frame
+    calls = []
+
+    def face_encodings(image):
+        calls.append(image.flags["C_CONTIGUOUS"])
+        return [np.array([0.1, 0.2, 0.3], dtype=np.float64)]
+
+    detect_module._models["fr"] = types.SimpleNamespace(face_encodings=face_encodings)
+
+    ok, msg = detect_module.snapshot_enroll("Ron", [0.1, 0.2, 0.8, 0.9])
+
+    assert ok is True
+    assert "Enrolled 'Ron'" in msg
+    assert calls == [True]
+    assert (tmp_path / "Ron.npy").exists()
+
+
+def test_snapshot_enroll_returns_clean_error_for_face_typeerror(monkeypatch, tmp_path):
+    detect_module = _import_detect_module()
+    detect_module.stop()
+    monkeypatch.setattr(detect_module, "FACES_DIR", str(tmp_path))
+    detect_module._frame_state["latest_frame"] = np.zeros((16, 16, 3), dtype=np.uint8)
+
+    def boom(_image):
+        raise TypeError("bad crop")
+
+    detect_module._models["fr"] = types.SimpleNamespace(face_encodings=boom)
+
+    ok, msg = detect_module.snapshot_enroll("Ron", [0.1, 0.1, 0.7, 0.8])
+
+    assert ok is False
+    assert msg == "face encoding failed for selected area — try again"

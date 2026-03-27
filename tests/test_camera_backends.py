@@ -74,6 +74,7 @@ class _FakePicamera:
         self.capture_count = 0
         self.frames = []
         self.camera_controls = {}
+        self.start_encoder_calls = []
 
     @staticmethod
     def global_camera_info():
@@ -92,6 +93,7 @@ class _FakePicamera:
         return None
 
     def start_encoder(self, *_args, **_kwargs):
+        self.start_encoder_calls.append((_args, _kwargs))
         return None
 
     def stop_encoder(self, *_args, **_kwargs):
@@ -129,3 +131,87 @@ def test_pi_backend_fresh_lores_capture_updates_cache(monkeypatch):
     assert backend.capture_fresh_lores_array() is fresh
     assert backend.capture_lores_array() is fresh
     assert backend._picam2.capture_count == 1
+
+
+def test_laptop_backend_preview_encode_uses_preview_settings():
+    import camera_backends.laptop_backend as module
+
+    class FakeCv2:
+        IMWRITE_JPEG_QUALITY = 99
+
+        def __init__(self):
+            self.resize_calls = []
+            self.encode_calls = []
+
+        def resize(self, _frame, size):
+            self.resize_calls.append(size)
+            return np.zeros((size[1], size[0], 3), dtype=np.uint8)
+
+        def imencode(self, ext, frame, params):
+            self.encode_calls.append((ext, frame.shape, params))
+            return True, np.array([1, 2, 3], dtype=np.uint8)
+
+    backend = module.LaptopCameraBackend(
+        stream_output=object(),
+        preview_jpeg_quality=72,
+        preview_size=(640, 360),
+    )
+    backend._cv2 = FakeCv2()
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    ok, encoded = backend._encode_preview_frame(frame)
+
+    assert ok is True
+    assert encoded.tolist() == [1, 2, 3]
+    assert backend._cv2.resize_calls == [(640, 360)]
+    assert backend._cv2.encode_calls == [('.jpg', (360, 640, 3), [99, 72])]
+
+
+def test_pi_backend_preview_encoder_falls_back_when_quality_override_unsupported(monkeypatch):
+    calls = []
+
+    def fake_jpeg_encoder(*args, **kwargs):
+        calls.append((args, kwargs))
+        if kwargs:
+            raise TypeError("quality override unsupported")
+        return object()
+
+    module = _import_pi_backend(monkeypatch, _FakePicamera)
+    monkeypatch.setattr(module, "JpegEncoder", fake_jpeg_encoder)
+
+    backend = module.PiCameraBackend(stream_output=object(), preview_jpeg_quality=70)
+
+    assert backend._jpeg_encoder is not None
+    assert calls == [((), {"q": 70}), ((), {})]
+
+
+def test_pi_backend_reports_lores_stream_as_effective_preview_size_after_start(monkeypatch):
+    module = _import_pi_backend(monkeypatch, _FakePicamera)
+
+    backend = module.PiCameraBackend(stream_output=object(), preview_size=(640, 360))
+    fake_camera = _FakePicamera()
+    fake_camera.frames = [np.zeros((360, 640, 3), dtype=np.uint8)]
+    backend._picam2 = fake_camera
+    backend.start(rotation_deg=0)
+    metadata = backend.get_metadata()
+
+    assert metadata["preview_w"] == 640
+    assert metadata["preview_h"] == 360
+    assert metadata["preview_source"] == "lores"
+    assert metadata["preview_size_applied"] is True
+    backend.stop()
+
+
+def test_pi_backend_uses_lores_stream_for_preview_and_main_for_recording(monkeypatch):
+    module = _import_pi_backend(monkeypatch, _FakePicamera)
+    backend = module.PiCameraBackend(stream_output=object(), preview_size=(640, 360), preview_source="lores")
+    fake_camera = _FakePicamera()
+    fake_camera.frames = [np.zeros((360, 640, 3), dtype=np.uint8)]
+    backend._picam2 = fake_camera
+
+    backend.start(rotation_deg=0)
+    backend.start_recording("segment.h264", bitrate=2_500_000)
+
+    assert fake_camera.start_encoder_calls[0][1]["name"] == "lores"
+    assert fake_camera.start_encoder_calls[1][1]["name"] == "main"
+    backend.stop()

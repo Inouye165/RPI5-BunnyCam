@@ -44,8 +44,85 @@ def _load_local_env(filename: str = ".env.local"):
 
 _load_local_env()
 
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw_value = os.getenv(name)
+    try:
+        value = float(raw_value) if raw_value is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
 from camera_backends import create_camera_backend, normalize_camera_backend_name
 from camera_backends.base import BackendUnavailableError
+
+
+PREVIEW_PROFILES = {
+    "laptop": {
+        "profile": "laptop-low-latency",
+        "max_fps": 12.0,
+        "jpeg_quality": 60,
+        "size": (800, 450),
+        "source": "capture",
+    },
+    "pi": {
+        "profile": "pi-lores-preview",
+        "max_fps": 15.0,
+        "jpeg_quality": 60,
+        "size": (640, 360),
+        "source": "lores",
+    },
+}
+
+
+def _resolve_preview_settings() -> dict[str, object]:
+    backend = normalize_camera_backend_name(os.getenv("CAMERA_BACKEND"))
+    profile = dict(PREVIEW_PROFILES.get(backend, PREVIEW_PROFILES["pi"]))
+    env_overrides = []
+
+    if os.getenv("BUNNYCAM_PREVIEW_MAX_FPS") is not None:
+        env_overrides.append("BUNNYCAM_PREVIEW_MAX_FPS")
+    if os.getenv("BUNNYCAM_PREVIEW_JPEG_QUALITY") is not None:
+        env_overrides.append("BUNNYCAM_PREVIEW_JPEG_QUALITY")
+    if os.getenv("BUNNYCAM_PREVIEW_WIDTH") is not None:
+        env_overrides.append("BUNNYCAM_PREVIEW_WIDTH")
+    if os.getenv("BUNNYCAM_PREVIEW_HEIGHT") is not None:
+        env_overrides.append("BUNNYCAM_PREVIEW_HEIGHT")
+    if os.getenv("BUNNYCAM_PREVIEW_SOURCE") is not None:
+        env_overrides.append("BUNNYCAM_PREVIEW_SOURCE")
+
+    width_default, height_default = profile["size"]
+    return {
+        "backend": backend,
+        "profile": profile["profile"],
+        "max_fps": _env_float("BUNNYCAM_PREVIEW_MAX_FPS", profile["max_fps"], minimum=1.0, maximum=30.0),
+        "jpeg_quality": _env_int("BUNNYCAM_PREVIEW_JPEG_QUALITY", profile["jpeg_quality"], minimum=40, maximum=95),
+        "width": _env_int("BUNNYCAM_PREVIEW_WIDTH", width_default, minimum=320, maximum=1920),
+        "height": _env_int("BUNNYCAM_PREVIEW_HEIGHT", height_default, minimum=180, maximum=1080),
+        "source": (os.getenv("BUNNYCAM_PREVIEW_SOURCE") or profile["source"]).strip().lower(),
+        "env_overrides": tuple(env_overrides),
+        "drop_policy": "latest-frame",
+    }
+
+
+PREVIEW_SETTINGS = _resolve_preview_settings()
 
 try:
     from waitress import serve as waitress_serve
@@ -116,18 +193,31 @@ cfg = {
 # MJPEG streaming output
 # --------------------
 class StreamingOutput(io.BufferedIOBase):
-    def __init__(self):
+    def __init__(self, max_fps: float | None = None):
         self.frame = None
         self.condition = Condition()
+        self.max_fps = float(max_fps) if max_fps else None
+        self._last_publish_monotonic = 0.0
+
+    def set_max_fps(self, max_fps: float | None):
+        with self.condition:
+            self.max_fps = float(max_fps) if max_fps else None
+            self._last_publish_monotonic = 0.0
 
     def write(self, buf):
+        now = time.monotonic()
         with self.condition:
             self.frame = bytes(buf)
+            if self.max_fps and self.frame is not None:
+                min_interval = 1.0 / self.max_fps
+                if (now - self._last_publish_monotonic) < min_interval:
+                    return len(buf)
+            self._last_publish_monotonic = now
             self.condition.notify_all()
         return len(buf)
 
 
-stream_output = StreamingOutput()
+stream_output = StreamingOutput(max_fps=float(PREVIEW_SETTINGS["max_fps"]))
 
 
 # --------------------
@@ -190,7 +280,12 @@ def _update_caminfo(main_size, lores_size):
 
 
 def _configure_camera_backend(backend=None):
-    runtime_state["camera_backend"] = backend if backend is not None else create_camera_backend(stream_output=stream_output)
+    runtime_state["camera_backend"] = backend if backend is not None else create_camera_backend(
+        stream_output=stream_output,
+        preview_jpeg_quality=int(PREVIEW_SETTINGS["jpeg_quality"]),
+        preview_size=(int(PREVIEW_SETTINGS["width"]), int(PREVIEW_SETTINGS["height"])),
+        preview_source=str(PREVIEW_SETTINGS["source"]),
+    )
     runtime_state["camera_backend_error"] = None
     return runtime_state["camera_backend"]
 
@@ -887,7 +982,11 @@ def gen_frames():
 
 @app.get("/stream.mjpg")
 def stream():
-    return Response(gen_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response = Response(gen_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.get("/status")
@@ -1063,6 +1162,18 @@ def _camera_config_payload():
         "record_enabled": cfg["record_enabled"],
         "record_segment_sec": cfg["record_segment_sec"],
         "record_keep_segments": cfg["record_keep_segments"],
+        "preview_profile": PREVIEW_SETTINGS["profile"],
+        "preview_backend_profile": PREVIEW_SETTINGS["backend"],
+        "preview_source": PREVIEW_SETTINGS["source"],
+        "preview_max_fps": PREVIEW_SETTINGS["max_fps"],
+        "preview_jpeg_quality": PREVIEW_SETTINGS["jpeg_quality"],
+        "preview_target_width": PREVIEW_SETTINGS["width"],
+        "preview_target_height": PREVIEW_SETTINGS["height"],
+        "preview_width": int(PREVIEW_SETTINGS["width"]),
+        "preview_height": int(PREVIEW_SETTINGS["height"]),
+        "preview_drop_policy": PREVIEW_SETTINGS["drop_policy"],
+        "preview_env_overrides": list(PREVIEW_SETTINGS["env_overrides"]),
+        "preview_size_applied": True,
         "transform_supported": False,
         "record_supported": False,
         "focus_supported": False,
@@ -1082,6 +1193,12 @@ def _camera_config_payload():
     payload["transform_supported"] = bool(getattr(backend, "supports_rotation", False))
     payload["record_supported"] = bool(getattr(backend, "supports_recording", False))
     payload["focus_supported"] = _camera_supports_autofocus()
+
+    backend_metadata = backend.get_metadata()
+    payload["preview_source"] = str(backend_metadata.get("preview_source") or payload["preview_source"])
+    payload["preview_width"] = int(backend_metadata.get("preview_w") or payload["preview_width"])
+    payload["preview_height"] = int(backend_metadata.get("preview_h") or payload["preview_height"])
+    payload["preview_size_applied"] = bool(backend_metadata.get("preview_size_applied", payload["preview_size_applied"]))
 
     camera_controls = backend.camera_controls
     if "LensPosition" in camera_controls:
@@ -1490,6 +1607,22 @@ def initialize_runtime(camera_backend_override=None):
 
     load_existing_mp4_manifest()
     apply_camera_config(cfg["rotation"])
+
+    backend_metadata = get_camera_backend().get_metadata()
+    logger.info(
+        "Preview tuning active: backend=%s profile=%s source=%s target=%dx%d effective=%dx%d jpeg_quality=%d max_fps=%.1f drop_policy=%s overrides=%s",
+        backend_metadata.get("backend"),
+        PREVIEW_SETTINGS["profile"],
+        backend_metadata.get("preview_source") or PREVIEW_SETTINGS["source"],
+        int(PREVIEW_SETTINGS["width"]),
+        int(PREVIEW_SETTINGS["height"]),
+        int(backend_metadata.get("preview_w") or PREVIEW_SETTINGS["width"]),
+        int(backend_metadata.get("preview_h") or PREVIEW_SETTINGS["height"]),
+        int(PREVIEW_SETTINGS["jpeg_quality"]),
+        float(PREVIEW_SETTINGS["max_fps"]),
+        PREVIEW_SETTINGS["drop_policy"],
+        ", ".join(PREVIEW_SETTINGS["env_overrides"]) if PREVIEW_SETTINGS["env_overrides"] else "none",
+    )
 
     if _detect is not None and not runtime_state["detect_started"]:
         _detect.start(capture_lores_array)

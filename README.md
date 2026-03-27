@@ -198,6 +198,46 @@ VS Code workspace helpers are also included:
 
 The laptop backend expects an OpenCV package that provides `cv2` in the active Python environment.
 
+## Preview Tuning
+
+The live browser preview is tuned separately from motion detection and recording so latency changes do not weaken recording reliability.
+
+Current default preview profiles:
+
+- `CAMERA_BACKEND=laptop`: `800x450`, JPEG quality `60`, max preview publish rate `12 fps`
+- `CAMERA_BACKEND=pi`: dedicated `lores` preview source at `640x360`, JPEG quality `60`, max preview publish rate `15 fps`
+
+Notes:
+
+- The laptop backend applies all three preview controls directly.
+- The Pi backend now serves browser preview from a dedicated lighter `lores` stream while recording remains on the `main` stream, so preview latency can drop without reducing recording quality.
+- The preview path drops stale frames on purpose so the browser sees the newest available frame instead of building latency.
+- On Pi, this should feel more live but may look softer than the old main-stream preview because the preview is now intentionally decoupled from the recording path.
+
+You can override the preview tuning without changing code by setting any of these environment variables:
+
+```text
+BUNNYCAM_PREVIEW_MAX_FPS
+BUNNYCAM_PREVIEW_JPEG_QUALITY
+BUNNYCAM_PREVIEW_WIDTH
+BUNNYCAM_PREVIEW_HEIGHT
+BUNNYCAM_PREVIEW_SOURCE
+```
+
+Examples:
+
+```powershell
+$env:BUNNYCAM_PREVIEW_MAX_FPS = "10"
+$env:BUNNYCAM_PREVIEW_JPEG_QUALITY = "55"
+$env:BUNNYCAM_PREVIEW_WIDTH = "640"
+$env:BUNNYCAM_PREVIEW_HEIGHT = "360"
+$env:BUNNYCAM_PREVIEW_SOURCE = "lores"
+```
+
+`BUNNYCAM_PREVIEW_SOURCE` is mainly useful on Raspberry Pi. Supported Pi values are `lores` and `main`; the default is `lores` for lower latency.
+
+You can verify the effective preview settings through `GET /config` and at startup in the BunnyCam server log, which now reports the active preview profile, preview source, target size, effective size, JPEG quality, and stale-frame drop policy.
+
 Typical service management:
 
 ```bash
