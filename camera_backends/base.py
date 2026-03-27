@@ -51,6 +51,9 @@ class CameraBackend(ABC):
     def capture_lores_array(self):
         raise NotImplementedError
 
+    def capture_fresh_lores_array(self):
+        return self.capture_lores_array()
+
     def start_recording(self, path_h264: str, bitrate: int) -> None:
         raise UnsupportedCameraFeature(f"Backend '{self.name}' does not support recording.")
 

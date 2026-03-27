@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from picamera2 import Picamera2
@@ -16,6 +17,7 @@ except Exception:
 from .base import CameraBackend, normalize_rotation, sizes_for_rotation
 
 logger = logging.getLogger(__name__)
+LORES_PUBLISH_FPS = 15.0
 
 
 def create_picamera(retries: int = 10, retry_delay: float = 1.0):
@@ -56,11 +58,58 @@ class PiCameraBackend(CameraBackend):
         self._jpeg_output = FileOutput(stream_output)
         self._h264_encoder = None
         self._h264_output = None
+        self._lores_capture_lock = threading.Lock()
+        self._lores_frame_lock = threading.Lock()
+        self._lores_stop_evt = threading.Event()
+        self._lores_frame_ready = threading.Event()
+        self._lores_thread = None
+        self._latest_lores = None
 
     def _ensure_camera(self):
         if self._picam2 is None:
             self._picam2 = create_picamera()
         return self._picam2
+
+    def _capture_lores_direct(self):
+        picam2 = self._picam2
+        if picam2 is None:
+            return None
+        with self._lores_capture_lock:
+            return picam2.capture_array("lores")
+
+    def _lores_capture_loop(self) -> None:
+        interval = 1.0 / LORES_PUBLISH_FPS
+        while not self._lores_stop_evt.is_set():
+            started_at = time.monotonic()
+            try:
+                frame = self._capture_lores_direct()
+            except Exception as exc:
+                logger.debug("lores publisher capture failed: %s", exc)
+                self._lores_stop_evt.wait(0.05)
+                continue
+
+            if frame is not None:
+                with self._lores_frame_lock:
+                    self._latest_lores = frame
+                self._lores_frame_ready.set()
+
+            delay = max(0.0, interval - (time.monotonic() - started_at))
+            self._lores_stop_evt.wait(delay)
+
+    def _stop_lores_publisher(self) -> None:
+        self._lores_stop_evt.set()
+        if self._lores_thread is not None and self._lores_thread.is_alive():
+            self._lores_thread.join(timeout=1.0)
+        self._lores_thread = None
+        self._lores_frame_ready.clear()
+        with self._lores_frame_lock:
+            self._latest_lores = None
+
+    def _start_lores_publisher(self) -> None:
+        self._stop_lores_publisher()
+        self._lores_stop_evt.clear()
+        self._lores_thread = threading.Thread(target=self._lores_capture_loop, daemon=True, name="pi-lores")
+        self._lores_thread.start()
 
     def _transform_for_rotation(self, rotation_deg: int):
         if Transform is None:
@@ -129,9 +178,14 @@ class PiCameraBackend(CameraBackend):
         picam2.start()
         self._apply_autofocus_if_supported()
         picam2.start_encoder(self._jpeg_encoder, self._jpeg_output, name="main")
+        self._start_lores_publisher()
+        if not self._lores_frame_ready.wait(timeout=1.0):
+            self.stop()
+            raise RuntimeError("Pi camera lores publisher started but no lores frames were received within 1 second.")
 
     def stop(self) -> None:
         picam2 = self._picam2
+        self._stop_lores_publisher()
         if picam2 is None:
             return
         self.stop_recording()
@@ -142,10 +196,16 @@ class PiCameraBackend(CameraBackend):
             pass
 
     def capture_lores_array(self):
-        picam2 = self._picam2
-        if picam2 is None:
-            return None
-        return picam2.capture_array("lores")
+        with self._lores_frame_lock:
+            return self._latest_lores
+
+    def capture_fresh_lores_array(self):
+        frame = self._capture_lores_direct()
+        if frame is not None:
+            with self._lores_frame_lock:
+                self._latest_lores = frame
+            self._lores_frame_ready.set()
+        return frame
 
     def start_recording(self, path_h264: str, bitrate: int) -> None:
         picam2 = self._ensure_camera()

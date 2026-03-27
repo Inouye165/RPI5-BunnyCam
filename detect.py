@@ -93,6 +93,8 @@ _status: dict = {
     "face_recognition_reason": "face_recognition not loaded",
 }
 _stop         = threading.Event()
+_thread_lock  = threading.Lock()
+_worker_state = {"thread": None}
 _candidate_collector = CandidateCollector(CANDIDATE_ROOT, CandidateCollectorConfig())
 
 
@@ -582,13 +584,24 @@ def _worker(get_frame_fn: Callable) -> None:
 
 def start(get_frame_fn: Callable) -> None:
     """Start the background detection thread (non-blocking)."""
-    threading.Thread(target=_worker, args=(get_frame_fn,),
-                     daemon=True, name="detect").start()
+    with _thread_lock:
+        thread = _worker_state["thread"]
+        if thread is not None and thread.is_alive():
+            return
+        _stop.clear()
+        thread = threading.Thread(target=_worker, args=(get_frame_fn,), daemon=True, name="detect")
+        _worker_state["thread"] = thread
+        thread.start()
     logger.info("detect: worker starting at %.1f fps", DETECT_FPS)
 
 
-def stop() -> None:
+def stop(timeout: float = 1.0) -> None:
     _stop.set()
+    with _thread_lock:
+        thread = _worker_state["thread"]
+        _worker_state["thread"] = None
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
 
 
 def get_detections() -> dict:

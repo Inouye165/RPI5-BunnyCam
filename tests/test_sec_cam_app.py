@@ -1,7 +1,11 @@
+# pylint: disable=protected-access
+
 import builtins
 import importlib
 import sys
 import types
+
+import numpy as np
 
 
 def _fresh_import_sec_cam(monkeypatch, backend_name="laptop", block_pi_imports=False):
@@ -48,6 +52,9 @@ class FakeBackend:
 
     def capture_lores_array(self):
         return None
+
+    def capture_fresh_lores_array(self):
+        return self.capture_lores_array()
 
     def autofocus_supported(self):
         return False
@@ -125,6 +132,28 @@ def test_detections_route_reports_disabled_reason(monkeypatch):
     assert payload["enabled"] is False
     assert payload["reason"] == "ultralytics missing"
     assert payload["model"] == "none"
+
+
+def test_measure_at_uses_fresh_lores_capture_for_focus(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    controls_mod = types.SimpleNamespace(AfModeEnum=types.SimpleNamespace(Manual="manual"))
+    backend = types.SimpleNamespace(set_controls=lambda _controls: None)
+    fresh_calls = []
+    cached_calls = []
+
+    monkeypatch.setattr(module, "_controls_module", lambda: controls_mod)
+    monkeypatch.setattr(module, "get_camera_backend", lambda: backend)
+    monkeypatch.setattr(module, "capture_fresh_lores_array", lambda: fresh_calls.append(True) or frame)
+    monkeypatch.setattr(module, "capture_lores_array", lambda: cached_calls.append(True) or frame)
+    monkeypatch.setattr(module, "_sharpness_at", lambda *_args, **_kwargs: 1.0)
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    score = module._measure_at(1.25, (0, 2, 0, 2))
+
+    assert score == 1.0
+    assert len(fresh_calls) == 2
+    assert not cached_calls
 
 
 def test_status_route_includes_detection_state(monkeypatch):
