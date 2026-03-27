@@ -380,17 +380,12 @@ let currentMode = 'live';
 let pageVisible = document.visibilityState !== 'hidden';
 
 const POLL_POLICY = Object.freeze({
-  status: {
-    liveVisibleMs: 500,
-    liveHiddenMs: 1800,
-    playbackVisibleMs: 2200,
+  liveState: {
+    liveVisibleMs: 1000,
+    liveHiddenMs: 4000,
+    playbackVisibleMs: 2500,
     playbackHiddenMs: 5000,
     maxBackoffMs: 15000,
-  },
-  detections: {
-    liveVisibleMs: 850,
-    liveHiddenMs: null,
-    maxBackoffMs: 12000,
   },
   dvrManifest: {
     playbackVisibleMs: 12000,
@@ -489,16 +484,11 @@ function extractErrorMessage(data, text, status) {
   return 'Request failed: ' + status;
 }
 
-function getStatusPollDelay() {
+function getLiveStatePollDelay() {
   if (currentMode === 'live') {
-    return pageVisible ? POLL_POLICY.status.liveVisibleMs : POLL_POLICY.status.liveHiddenMs;
+    return pageVisible ? POLL_POLICY.liveState.liveVisibleMs : POLL_POLICY.liveState.liveHiddenMs;
   }
-  return pageVisible ? POLL_POLICY.status.playbackVisibleMs : POLL_POLICY.status.playbackHiddenMs;
-}
-
-function getDetectionPollDelay() {
-  if (currentMode !== 'live') return null;
-  return pageVisible ? POLL_POLICY.detections.liveVisibleMs : POLL_POLICY.detections.liveHiddenMs;
+  return pageVisible ? POLL_POLICY.liveState.playbackVisibleMs : POLL_POLICY.liveState.playbackHiddenMs;
 }
 
 function getManifestPollDelay() {
@@ -652,11 +642,15 @@ function setMode(mode){
   if(mode === 'live'){
     tabLive.classList.add('active'); tabPlay.classList.remove('active');
     liveWrap.classList.remove('hidden'); playWrap.classList.add('hidden');
+    // Restore MJPEG if it was paused
+    if (!cam.src || cam.dataset.paused) { cam.src = '/stream.mjpg'; cam.dataset.paused = ''; }
   } else {
     tabPlay.classList.add('active'); tabLive.classList.remove('active');
     playWrap.classList.remove('hidden'); liveWrap.classList.add('hidden');
+    // Pause MJPEG when switching to playback
+    cam.src = ''; cam.dataset.paused = '1';
   }
-  syncPolling({ immediateFamilies: mode === 'playback' ? ['status', 'manifest'] : ['status', 'detections'] });
+  syncPolling({ immediateFamilies: mode === 'playback' ? ['liveState', 'manifest'] : ['liveState'] });
 }
 tabLive.addEventListener('click', () => setMode('live'));
 tabPlay.addEventListener('click', () => setMode('playback'));
@@ -905,10 +899,13 @@ document.getElementById('jumpNow').addEventListener('click', async () => {
   await goToAgo(0);
 });
 
-// Poll status + instant buzz
-async function pollStatus({ signal } = {}){
-  const s = await fetchJSON('/status', { signal });
+// Combined status + detections poll (one fetch instead of two)
+async function pollLiveState({ signal } = {}) {
+  const j = await fetchJSON('/api/live-state', { signal });
+  const s = j.status;
+  const d = j.detect;
 
+  // ── Status update ──
   const top = document.getElementById('top');
   const b = document.getElementById('banner');
   const m = document.getElementById('meta');
@@ -934,6 +931,11 @@ async function pollStatus({ signal } = {}){
     lastBuzzMs = now;
   }
   prevMotion = !!s.motion;
+
+  // ── Detection overlay update (skip when not in live mode) ──
+  if (currentMode === 'live') {
+    applyDetections(d);
+  }
 }
 
 // Initial config
@@ -1186,9 +1188,7 @@ function setDetectBadge(enabled, reason) {
   }
 }
 
-async function pollDetections({ signal } = {}) {
-  if (liveWrap.classList.contains('hidden')) return;
-  const d = await fetchJSON('/detections', { signal });
+function applyDetections(d) {
   const dets = d.detections || [];
   lastDetections = dets;
 
@@ -1342,15 +1342,10 @@ function esc(s) {
 }
 
 const pollers = {
-  status: createSingleFlightPoller('status', {
-    run: pollStatus,
-    getDelay: getStatusPollDelay,
-    maxBackoffMs: POLL_POLICY.status.maxBackoffMs,
-  }),
-  detections: createSingleFlightPoller('detections', {
-    run: pollDetections,
-    getDelay: getDetectionPollDelay,
-    maxBackoffMs: POLL_POLICY.detections.maxBackoffMs,
+  liveState: createSingleFlightPoller('liveState', {
+    run: pollLiveState,
+    getDelay: getLiveStatePollDelay,
+    maxBackoffMs: POLL_POLICY.liveState.maxBackoffMs,
   }),
   manifest: createSingleFlightPoller('manifest', {
     run: fetchManifest,
@@ -1381,10 +1376,17 @@ function requestIdentityRefresh() {
 
 document.addEventListener('visibilitychange', () => {
   pageVisible = document.visibilityState !== 'hidden';
+  // Pause/resume MJPEG stream — saves bandwidth + CPU when tab is hidden
+  if (currentMode === 'live') {
+    if (pageVisible) {
+      if (!cam.src || cam.dataset.paused) { cam.src = '/stream.mjpg'; cam.dataset.paused = ''; }
+    } else {
+      cam.src = ''; cam.dataset.paused = '1';
+    }
+  }
   const immediateFamilies = [];
   if (pageVisible) {
-    immediateFamilies.push('status', 'identities');
-    if (currentMode === 'live') immediateFamilies.push('detections');
+    immediateFamilies.push('liveState', 'identities');
     if (currentMode === 'playback') immediateFamilies.push('manifest');
   }
   syncPolling({ immediateFamilies });
@@ -1396,10 +1398,10 @@ window.addEventListener('beforeunload', () => {
 
 loadConfig().then(() => {
   requestIdentityRefresh();
-  syncPolling({ immediateFamilies: ['status', 'detections'] });
+  syncPolling({ immediateFamilies: ['liveState'] });
 }).catch((error) => {
   console.debug('[config] initial load failed', error);
-  syncPolling({ immediateFamilies: ['status', 'detections'] });
+  syncPolling({ immediateFamilies: ['liveState'] });
 });
 </script>
 </body>
