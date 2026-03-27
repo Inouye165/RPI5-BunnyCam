@@ -76,6 +76,14 @@ class CameraBackend(ABC):
         return {}
 
     @property
+    def effective_preview_size(self) -> tuple[int, int]:
+        return self.preview_stream_size or self._main_size
+
+    @property
+    def preview_size_applied(self) -> bool:
+        return self.preview_stream_size is not None and self.effective_preview_size == self.preview_stream_size
+
+    @property
     def camera_controls(self) -> Mapping[str, Any]:
         return {}
 
@@ -86,14 +94,16 @@ class CameraBackend(ABC):
         return False
 
     def get_metadata(self) -> dict[str, Any]:
+        preview_w, preview_h = self.effective_preview_size
         return {
             "backend": self.name,
             "main_w": self._main_size[0],
             "main_h": self._main_size[1],
             "lores_w": self._lores_size[0],
             "lores_h": self._lores_size[1],
-            "preview_w": None if self.preview_stream_size is None else self.preview_stream_size[0],
-            "preview_h": None if self.preview_stream_size is None else self.preview_stream_size[1],
+            "preview_w": preview_w,
+            "preview_h": preview_h,
+            "preview_size_applied": self.preview_size_applied,
             "rotation": self.rotation,
             "supports_recording": self.supports_recording,
             "supports_rotation": self.supports_rotation,

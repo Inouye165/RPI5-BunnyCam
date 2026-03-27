@@ -198,6 +198,41 @@ VS Code workspace helpers are also included:
 
 The laptop backend expects an OpenCV package that provides `cv2` in the active Python environment.
 
+## Preview Tuning
+
+The live browser preview is tuned separately from motion detection and recording so latency changes do not weaken recording reliability.
+
+Current default preview profiles:
+
+- `CAMERA_BACKEND=laptop`: `800x450`, JPEG quality `60`, max preview publish rate `12 fps`
+- `CAMERA_BACKEND=pi`: target `960x540`, JPEG quality `60`, max preview publish rate `12 fps`
+
+Notes:
+
+- The laptop backend applies all three preview controls directly.
+- The Pi backend currently applies preview JPEG quality and stale-frame dropping directly, while the preview size target is reported for diagnostics and future tuning; recording still remains on the main stream.
+- The preview path drops stale frames on purpose so the browser sees the newest available frame instead of building latency.
+
+You can override the preview tuning without changing code by setting any of these environment variables:
+
+```text
+BUNNYCAM_PREVIEW_MAX_FPS
+BUNNYCAM_PREVIEW_JPEG_QUALITY
+BUNNYCAM_PREVIEW_WIDTH
+BUNNYCAM_PREVIEW_HEIGHT
+```
+
+Examples:
+
+```powershell
+$env:BUNNYCAM_PREVIEW_MAX_FPS = "10"
+$env:BUNNYCAM_PREVIEW_JPEG_QUALITY = "55"
+$env:BUNNYCAM_PREVIEW_WIDTH = "640"
+$env:BUNNYCAM_PREVIEW_HEIGHT = "360"
+```
+
+You can verify the effective preview settings through `GET /config` and at startup in the BunnyCam server log, which now reports the active preview profile, target size, effective size, JPEG quality, and stale-frame drop policy.
+
 Typical service management:
 
 ```bash

@@ -72,6 +72,14 @@ class PiCameraBackend(CameraBackend):
             logger.debug("JpegEncoder does not accept quality override; using defaults.")
             return JpegEncoder()
 
+    @property
+    def effective_preview_size(self) -> tuple[int, int]:
+        return self._main_size
+
+    @property
+    def preview_size_applied(self) -> bool:
+        return False
+
     def _ensure_camera(self):
         if self._picam2 is None:
             self._picam2 = create_picamera()

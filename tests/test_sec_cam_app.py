@@ -531,6 +531,28 @@ def test_config_when_detect_module_unavailable(monkeypatch):
     assert payload["detection_reason"] == "detect module unavailable"
 
 
+def test_preview_settings_default_for_laptop_backend(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    assert module.PREVIEW_SETTINGS["backend"] == "laptop"
+    assert module.PREVIEW_SETTINGS["profile"] == "laptop-low-latency"
+    assert module.PREVIEW_SETTINGS["max_fps"] == 12.0
+    assert module.PREVIEW_SETTINGS["jpeg_quality"] == 60
+    assert module.PREVIEW_SETTINGS["width"] == 800
+    assert module.PREVIEW_SETTINGS["height"] == 450
+
+
+def test_preview_settings_default_for_pi_backend(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="pi")
+
+    assert module.PREVIEW_SETTINGS["backend"] == "pi"
+    assert module.PREVIEW_SETTINGS["profile"] == "pi-balanced-low-latency"
+    assert module.PREVIEW_SETTINGS["max_fps"] == 12.0
+    assert module.PREVIEW_SETTINGS["jpeg_quality"] == 60
+    assert module.PREVIEW_SETTINGS["width"] == 960
+    assert module.PREVIEW_SETTINGS["height"] == 540
+
+
 def test_config_route_includes_preview_settings(monkeypatch):
     monkeypatch.setenv("BUNNYCAM_PREVIEW_MAX_FPS", "12")
     monkeypatch.setenv("BUNNYCAM_PREVIEW_JPEG_QUALITY", "68")
@@ -545,10 +567,21 @@ def test_config_route_includes_preview_settings(monkeypatch):
 
     assert response.status_code == 200
     payload = response.get_json()
+    assert payload["preview_profile"] == "laptop-low-latency"
+    assert payload["preview_backend_profile"] == "laptop"
     assert payload["preview_max_fps"] == 12.0
     assert payload["preview_jpeg_quality"] == 68
     assert payload["preview_width"] == 800
     assert payload["preview_height"] == 450
+    assert payload["preview_target_width"] == 800
+    assert payload["preview_target_height"] == 450
+    assert payload["preview_drop_policy"] == "latest-frame"
+    assert payload["preview_env_overrides"] == [
+        "BUNNYCAM_PREVIEW_MAX_FPS",
+        "BUNNYCAM_PREVIEW_JPEG_QUALITY",
+        "BUNNYCAM_PREVIEW_WIDTH",
+        "BUNNYCAM_PREVIEW_HEIGHT",
+    ]
 
 
 def test_streaming_output_drops_frames_inside_preview_budget(monkeypatch):
@@ -560,7 +593,7 @@ def test_streaming_output_drops_frames_inside_preview_budget(monkeypatch):
     output.write(b"frame-1")
     assert output.frame == b"frame-1"
     output.write(b"frame-2")
-    assert output.frame == b"frame-1"
+    assert output.frame == b"frame-2"
     output.write(b"frame-3")
 
     assert output.frame == b"frame-3"

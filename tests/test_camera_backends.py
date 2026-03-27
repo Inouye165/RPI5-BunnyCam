@@ -181,3 +181,14 @@ def test_pi_backend_preview_encoder_falls_back_when_quality_override_unsupported
 
     assert backend._jpeg_encoder is not None
     assert calls == [((), {"q": 70}), ((), {})]
+
+
+def test_pi_backend_reports_main_stream_as_effective_preview_size(monkeypatch):
+    module = _import_pi_backend(monkeypatch, _FakePicamera)
+
+    backend = module.PiCameraBackend(stream_output=object(), preview_size=(640, 360))
+    metadata = backend.get_metadata()
+
+    assert metadata["preview_w"] == 1280
+    assert metadata["preview_h"] == 720
+    assert metadata["preview_size_applied"] is False
