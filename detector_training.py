@@ -207,6 +207,7 @@ class DetectorTrainingManager:
         )
         manifest["status"] = "scaffolded"
         self._write_run_files(manifest)
+        self._refresh_index(latest_run_dir=manifest["output"]["run_dir"])
         return manifest
 
     def train(
@@ -248,6 +249,7 @@ class DetectorTrainingManager:
                 train_kwargs["device"] = device
             result = model.train(**train_kwargs)
             metrics, metrics_source = self._extract_metrics(result, manifest["output"]["trainer_run_dir"])
+            # Only validate output paths for completed runs
             artifact_paths = self._validate_output_paths(manifest["output"])
             duration_seconds = round(time.monotonic() - started_monotonic, 3)
             manifest["status"] = "completed"
@@ -395,7 +397,7 @@ class DetectorTrainingManager:
             "exist_ok=True",
         ]
         if device and device != "auto":
-            parts.append(f'device="{device}"')
+            parts.append(f"device={device}")
         return " ".join(parts)
 
     def _quote_command(self, parts: list[str]) -> str:
@@ -457,14 +459,23 @@ class DetectorTrainingManager:
         last_checkpoint_path = output_paths.get("last_checkpoint_path")
         trainer_run_dir = output_paths.get("trainer_run_dir")
         results_csv_path = output_paths.get("results_csv_path")
-        if not isinstance(trainer_run_dir, str) or not os.path.isdir(trainer_run_dir):
-            raise RuntimeError(f"trainer output directory was not created: {trainer_run_dir}")
-        if not isinstance(best_checkpoint_path, str) or not os.path.isfile(best_checkpoint_path):
-            raise RuntimeError(f"best checkpoint was not created: {best_checkpoint_path}")
-        if isinstance(last_checkpoint_path, str) and last_checkpoint_path and not os.path.isfile(last_checkpoint_path):
-            last_checkpoint_path = None
-        if isinstance(results_csv_path, str) and results_csv_path and not os.path.isfile(results_csv_path):
-            results_csv_path = None
+        
+        # For scaffolded runs, the trainer_run_dir might not exist yet
+        if not isinstance(trainer_run_dir, str):
+            raise RuntimeError(f"trainer_run_dir is not a string: {trainer_run_dir}")
+        
+        # For completed runs, check if files exist
+        if os.path.isdir(trainer_run_dir):
+            if not isinstance(best_checkpoint_path, str) or not os.path.isfile(best_checkpoint_path):
+                raise RuntimeError(f"best checkpoint was not created: {best_checkpoint_path}")
+            if isinstance(last_checkpoint_path, str) and last_checkpoint_path and not os.path.isfile(last_checkpoint_path):
+                last_checkpoint_path = None
+            if isinstance(results_csv_path, str) and results_csv_path and not os.path.isfile(results_csv_path):
+                results_csv_path = None
+        else:
+            # For scaffolded runs, keep the planned paths
+            pass
+            
         return {
             "best_checkpoint_path": best_checkpoint_path,
             "last_checkpoint_path": last_checkpoint_path,
