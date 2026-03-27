@@ -118,6 +118,7 @@ class LaptopCameraBackend(CameraBackend):
 
     def capture_lores_array(self):
         with self._frame_lock:
-            if self._latest_lores is None:
-                return None
-            return self._latest_lores.copy()
+            return self._latest_lores
+
+    def capture_fresh_lores_array(self):
+        return self.capture_lores_array()

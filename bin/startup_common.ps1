@@ -179,6 +179,7 @@ function Set-MarkdownSection {
 function Add-MarkdownSectionEntry {
     param(
         [string]$Path,
+        [string]$BeginMarker,
         [string]$EndMarker,
         [string[]]$Lines
     )
@@ -188,7 +189,18 @@ function Add-MarkdownSectionEntry {
     if ($entryText -and -not $entryText.EndsWith("`r`n")) {
         $entryText += "`r`n"
     }
-    $updated = $content.Replace($EndMarker, ($entryText + $EndMarker))
+
+    $beginToken = $BeginMarker + "`r`n"
+    $beginIndex = $content.IndexOf($beginToken)
+    $endToken = "`r`n$EndMarker"
+    $endIndex = $content.IndexOf($endToken, $beginIndex + $beginToken.Length)
+
+    if ($beginIndex -lt 0 -or $endIndex -lt 0) {
+        throw "Unable to update markdown section for marker pair $BeginMarker / $EndMarker."
+    }
+
+    $bodyStart = $beginIndex + $beginToken.Length
+    $updated = $content.Substring(0, $bodyStart) + $entryText + $content.Substring($bodyStart, $endIndex - $bodyStart) + $content.Substring($endIndex)
     Set-Content -Path $Path -Value $updated -Encoding utf8
 }
 
@@ -214,7 +226,7 @@ function Set-ResultsFileSections {
         Set-Content -Path $Path -Value (New-ResultsTemplate) -Encoding utf8
         if ($legacyHistory.Count -gt 0) {
             $historyBlock = @('### Legacy History Migration', '') + $legacyHistory + @('')
-            Add-MarkdownSectionEntry -Path $Path -EndMarker '<!-- STARTUP_RUN_HISTORY_END -->' -Lines $historyBlock
+            Add-MarkdownSectionEntry -Path $Path -BeginMarker '<!-- STARTUP_RUN_HISTORY_BEGIN -->' -EndMarker '<!-- STARTUP_RUN_HISTORY_END -->' -Lines $historyBlock
         }
     }
 
@@ -261,7 +273,7 @@ function Add-ResultsEntry {
         ''
     )
 
-    Add-MarkdownSectionEntry -Path $Path -EndMarker '<!-- STARTUP_RUN_HISTORY_END -->' -Lines $entry
+    Add-MarkdownSectionEntry -Path $Path -BeginMarker '<!-- STARTUP_RUN_HISTORY_BEGIN -->' -EndMarker '<!-- STARTUP_RUN_HISTORY_END -->' -Lines $entry
 }
 
 function Add-LlsNoteEntry {
@@ -295,7 +307,7 @@ function Add-LlsNoteEntry {
         ''
     )
 
-    Add-MarkdownSectionEntry -Path $Path -EndMarker '<!-- STARTUP_LLS_NOTES_END -->' -Lines $entry
+    Add-MarkdownSectionEntry -Path $Path -BeginMarker '<!-- STARTUP_LLS_NOTES_BEGIN -->' -EndMarker '<!-- STARTUP_LLS_NOTES_END -->' -Lines $entry
 }
 
 function Write-RuntimeState {

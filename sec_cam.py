@@ -144,6 +144,7 @@ runtime_state = {
     "runtime_initialized": False,
     "worker_threads_started": False,
     "detect_started": False,
+    "worker_threads": [],
 }
 
 
@@ -336,9 +337,9 @@ def _measure_at(pos: float, crop_box: tuple) -> float:
     controls_mod = _controls_module()
     with camera_lock:
         get_camera_backend().set_controls({"AfMode": controls_mod.AfModeEnum.Manual, "LensPosition": pos})
-    capture_lores_array()          # discard the frame already buffered before control applied
+    capture_fresh_lores_array()    # discard the frame already buffered before control applied
     time.sleep(FOCUS_SWEEP_SETTLE_S)
-    frame = capture_lores_array()
+    frame = capture_fresh_lores_array()
     if frame is None:
         return 0.0
     return _sharpness_at(frame, crop_box)
@@ -363,7 +364,7 @@ def _contrast_detect_sweep(x_norm: float, y_norm: float) -> float | None:
     lens_max = float(lens_range[1])   # ~15.0 = macro
 
     # Build crop box from lores frame dimensions
-    probe = capture_lores_array()
+    probe = capture_fresh_lores_array()
     if probe is None:
         return None
     fh, fw = probe.shape[:2]
@@ -498,6 +499,10 @@ def apply_camera_config(rotation_deg: int):
 
 def capture_lores_array():
     return get_camera_backend().capture_lores_array()
+
+
+def capture_fresh_lores_array():
+    return get_camera_backend().capture_fresh_lores_array()
 
 
 def save_snapshot(jpeg_bytes: bytes) -> str:
@@ -1448,6 +1453,11 @@ def identity_label_delete():
 def _graceful_shutdown(_signum, _frame):
     shutdown_evt.set()
     try:
+        if _detect is not None:
+            _detect.stop()
+        for thread in runtime_state.get("worker_threads", []):
+            if thread.is_alive():
+                thread.join(timeout=1.0)
         with camera_lock:
             if runtime_state["camera_backend"] is not None:
                 runtime_state["camera_backend"].stop()
@@ -1459,10 +1469,15 @@ def _start_worker_threads():
     if runtime_state["worker_threads_started"]:
         return
 
-    Thread(target=motion_loop, daemon=True).start()
-    Thread(target=rolling_record_loop, daemon=True).start()
-    Thread(target=convert_worker, daemon=True).start()
-    Thread(target=reconfig_worker, daemon=True).start()
+    threads = [
+        Thread(target=motion_loop, daemon=True, name="motion-loop"),
+        Thread(target=rolling_record_loop, daemon=True, name="rolling-record-loop"),
+        Thread(target=convert_worker, daemon=True, name="convert-worker"),
+        Thread(target=reconfig_worker, daemon=True, name="reconfig-worker"),
+    ]
+    for thread in threads:
+        thread.start()
+    runtime_state["worker_threads"] = threads
     runtime_state["worker_threads_started"] = True
 
 
