@@ -79,6 +79,13 @@ class LaptopCameraBackend(CameraBackend):
         cv2 = self._cv2
         assert cv2 is not None
 
+        # Pace expensive JPEG encode to the effective preview FPS.
+        # Camera reads continue at full speed to drain the webcam buffer
+        # and keep lores frames fresh for detection.
+        preview_max_fps = getattr(self.stream_output, "max_fps", None) or 30.0
+        preview_interval = 1.0 / preview_max_fps
+        last_encode_time = 0.0
+
         while not self._stop_evt.is_set():
             ok, frame_bgr = self._capture.read()
             if not ok or frame_bgr is None:
@@ -89,9 +96,12 @@ class LaptopCameraBackend(CameraBackend):
             lores_bgr = cv2.resize(frame_bgr, self._lores_size)
             lores_rgb = cv2.cvtColor(lores_bgr, cv2.COLOR_BGR2RGB)
 
-            ok, encoded = self._encode_preview_frame(frame_bgr)
-            if ok:
-                self.stream_output.write(encoded.tobytes())
+            now = time.monotonic()
+            if (now - last_encode_time) >= preview_interval:
+                ok_enc, encoded = self._encode_preview_frame(frame_bgr)
+                if ok_enc:
+                    self.stream_output.write(encoded.tobytes())
+                    last_encode_time = now
 
             with self._frame_lock:
                 self._latest_lores = lores_rgb

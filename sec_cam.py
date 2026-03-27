@@ -77,7 +77,7 @@ from camera_backends.base import BackendUnavailableError
 PREVIEW_PROFILES = {
     "laptop": {
         "profile": "laptop-low-latency",
-        "max_fps": 12.0,
+        "max_fps": 24.0,
         "jpeg_quality": 60,
         "size": (800, 450),
         "source": "capture",

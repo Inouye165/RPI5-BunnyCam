@@ -215,3 +215,135 @@ def test_pi_backend_uses_lores_stream_for_preview_and_main_for_recording(monkeyp
     assert fake_camera.start_encoder_calls[0][1]["name"] == "lores"
     assert fake_camera.start_encoder_calls[1][1]["name"] == "main"
     backend.stop()
+
+
+# ---------------------------------------------------------------------------
+# Laptop capture-loop preview pacing tests
+# ---------------------------------------------------------------------------
+
+def _make_fake_cv2_for_capture_loop():
+    """Return a fake cv2 module sufficient for _capture_loop."""
+    class FakeCv2:
+        IMWRITE_JPEG_QUALITY = 99
+
+        @staticmethod
+        def rotate(frame, _code):
+            return frame
+
+        @staticmethod
+        def resize(frame, size):
+            return np.zeros((size[1], size[0], 3), dtype=np.uint8)
+
+        @staticmethod
+        def cvtColor(frame, _code):
+            return frame
+
+        COLOR_BGR2RGB = 4
+        ROTATE_90_CLOCKWISE = 0
+        ROTATE_180 = 1
+        ROTATE_90_COUNTERCLOCKWISE = 2
+
+        @staticmethod
+        def imencode(_ext, frame, _params):
+            return True, np.array([0xFF, 0xD8], dtype=np.uint8)
+
+    return FakeCv2()
+
+
+class _FakeCapture:
+    """Yields a fixed number of frames then signals stop."""
+
+    def __init__(self, frame_count, stop_evt):
+        self._remaining = frame_count
+        self._stop_evt = stop_evt
+
+    def read(self):
+        if self._remaining <= 0:
+            self._stop_evt.set()
+            return False, None
+        self._remaining -= 1
+        return True, np.zeros((720, 1280, 3), dtype=np.uint8)
+
+
+class _CountingStreamOutput:
+    """Records every write call for assertion."""
+
+    def __init__(self, max_fps=None):
+        self.max_fps = max_fps
+        self.write_count = 0
+
+    def write(self, buf):
+        self.write_count += 1
+        return len(buf)
+
+
+def test_laptop_capture_loop_skips_encode_when_within_preview_interval():
+    """Encode/write should be skipped for frames arriving faster than preview FPS."""
+    import camera_backends.laptop_backend as module
+
+    stream = _CountingStreamOutput(max_fps=10.0)
+    backend = module.LaptopCameraBackend(stream_output=stream)
+    backend._cv2 = _make_fake_cv2_for_capture_loop()
+    backend._main_size = (1280, 720)
+    backend._lores_size = (320, 240)
+    backend.rotation = 0
+    backend._stop_evt.clear()
+
+    # First call returns a realistic value (triggers first encode since
+    # last_encode_time starts at 0.0). Remaining calls return the same
+    # timestamp, so (now - last) < interval and encodes are skipped.
+    import unittest.mock as mock
+    time_values = [1000.0] + [1000.0] * 49
+    with mock.patch.object(module.time, "monotonic", side_effect=time_values):
+        backend._capture = _FakeCapture(50, backend._stop_evt)
+        backend._capture_loop()
+
+    assert stream.write_count == 1, f"Expected 1 write, got {stream.write_count}"
+    # Lores should be updated on every iteration
+    assert backend._latest_lores is not None
+
+
+def test_laptop_capture_loop_encodes_when_interval_elapsed():
+    """Encode/write should fire each time enough time passes."""
+    import camera_backends.laptop_backend as module
+    import unittest.mock as mock
+
+    stream = _CountingStreamOutput(max_fps=10.0)
+    backend = module.LaptopCameraBackend(stream_output=stream)
+    backend._cv2 = _make_fake_cv2_for_capture_loop()
+    backend._main_size = (1280, 720)
+    backend._lores_size = (320, 240)
+    backend.rotation = 0
+    backend._stop_evt.clear()
+
+    # 5 frames, each 0.2s apart (interval = 0.1s for 10fps) — all should encode.
+    # Start at 1000.0 so the first frame triggers (1000 - 0 >> interval).
+    time_values = [1000.0 + i * 0.2 for i in range(5)]
+    with mock.patch.object(module.time, "monotonic", side_effect=time_values):
+        backend._capture = _FakeCapture(5, backend._stop_evt)
+        backend._capture_loop()
+
+    assert stream.write_count == 5, f"Expected 5 writes, got {stream.write_count}"
+
+
+def test_laptop_capture_loop_no_max_fps_encodes_every_frame():
+    """When stream_output has no max_fps, every frame should be encoded."""
+    import camera_backends.laptop_backend as module
+    import unittest.mock as mock
+
+    stream = _CountingStreamOutput(max_fps=None)
+    backend = module.LaptopCameraBackend(stream_output=stream)
+    backend._cv2 = _make_fake_cv2_for_capture_loop()
+    backend._main_size = (1280, 720)
+    backend._lores_size = (320, 240)
+    backend.rotation = 0
+    backend._stop_evt.clear()
+
+    # max_fps=None → fallback 30fps, interval ≈ 0.033s.
+    # Frames 50ms apart exceed the interval, so every frame encodes.
+    time_values = [1000.0 + i * 0.05 for i in range(10)]
+    with mock.patch.object(module.time, "monotonic", side_effect=time_values):
+        backend._capture = _FakeCapture(10, backend._stop_evt)
+        backend._capture_loop()
+
+    assert stream.write_count == 10, f"Expected 10 writes, got {stream.write_count}"
