@@ -79,6 +79,16 @@ Syntax validation:
 python3 -m py_compile sec_cam.py app.py
 ```
 
+## Windows Local Hardening Loop
+
+For Windows local development, use the repository root launcher:
+
+```powershell
+.\start_local.ps1
+```
+
+It installs dependencies if needed, starts BunnyCam, checks `/status`, watches for early exits, and appends a dated entry with the machine hostname to `STARTUP_RESULTS.md`.
+
 ## Storage Layout
 
 - `recordings/`: raw H.264 segments

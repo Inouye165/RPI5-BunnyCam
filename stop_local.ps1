@@ -1,2 +1,2 @@
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $scriptDir 'bin\start_local.ps1') @args
+& (Join-Path $scriptDir 'bin\stop_local.ps1') @args

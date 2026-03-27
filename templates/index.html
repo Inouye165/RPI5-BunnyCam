@@ -61,8 +61,15 @@
     .slider span { font-size: 12px; width: 50px; text-align: right; opacity: 0.85; }
 
     .tabs { display: flex; gap: 6px; }
-    .tab { border-radius: 10px; padding: 6px 10px; border: 1px solid #ccc; background: #fff; font-weight: 700; font-size: 12px; }
+    .tab { border-radius: 10px; padding: 6px 10px; border: 1px solid #ccc; background: #fff; font-weight: 700; font-size: 12px; text-decoration: none; color: inherit; display: inline-flex; align-items: center; }
     .tab.active { background: #111; color: #fff; border-color: #111; }
+    .version-pill {
+      display: inline-flex; align-items: center;
+      padding: 6px 10px; border-radius: 999px;
+      background: #111; color: #fff; border: 1px solid #111;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
 
     .videoWrap { position: relative; width: 100%; }
     img { width: 100%; border-radius: 12px; display: block; user-select: none; -webkit-user-drag: none; }
@@ -156,6 +163,7 @@
     }
     .identity-chip .remove-btn:hover { color: #f44336; }
     .identity-empty { font-size: 12px; opacity: 0.7; }
+    .identity-status { margin-top: 6px; font-size: 11px; opacity: 0.8; line-height: 1.4; }
 
     /* --- Enrollment modal --- */
     .enroll-modal-overlay {
@@ -223,6 +231,8 @@
       <div class="tabs">
         <button id="tabLive" class="tab active" type="button">Live</button>
         <button id="tabPlay" class="tab" type="button">Playback</button>
+        <a class="tab" href="/review">Review Queue</a>
+        <span class="version-pill">__APP_VERSION__</span>
       </div>
     </div>
 
@@ -322,6 +332,7 @@
         <div id="identityList" class="identity-list">
           <span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>
         </div>
+        <div id="identityStatus" class="identity-status hidden"></div>
       </div>
 
       <div id="meta" class="meta"></div>
@@ -425,9 +436,9 @@ function buzz() {
 async function postJSON(url, body) {
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const text = await r.text();
-    const data = text ? JSON.parse(text) : {};
+    const data = parseResponseBody(text, r.headers.get('content-type'));
     if (!r.ok) {
-        throw new Error(data.error || ('Request failed: ' + r.status));
+        throw new Error(extractErrorMessage(data, text, r.status));
     }
     return data;
 }
@@ -435,11 +446,46 @@ async function postJSON(url, body) {
 async function fetchJSON(url, options = {}) {
     const r = await fetch(url, options);
     const text = await r.text();
-    const data = text ? JSON.parse(text) : {};
+    const data = parseResponseBody(text, r.headers.get('content-type'));
     if (!r.ok) {
-        throw new Error(data.error || ('Request failed: ' + r.status));
+        throw new Error(extractErrorMessage(data, text, r.status));
     }
     return data;
+}
+
+function parseResponseBody(text, contentType) {
+  if (!text) return {};
+  const isJson = (contentType || '').toLowerCase().includes('application/json');
+  if (isJson) {
+    return JSON.parse(text);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return { rawText: text };
+  }
+}
+
+function extractErrorMessage(data, text, status) {
+  if (data && typeof data.error === 'string' && data.error.trim()) {
+    return data.error;
+  }
+  if (data && typeof data.message === 'string' && data.message.trim()) {
+    return data.message;
+  }
+  if (data && typeof data.rawText === 'string') {
+    const firstLine = data.rawText.trim().split(/\r?\n/, 1)[0];
+    if (firstLine) {
+      return firstLine.length > 180 ? firstLine.slice(0, 177) + '...' : firstLine;
+    }
+  }
+  if (text && text.trim()) {
+    const firstLine = text.trim().split(/\r?\n/, 1)[0];
+    if (firstLine) {
+      return firstLine.length > 180 ? firstLine.slice(0, 177) + '...' : firstLine;
+    }
+  }
+  return 'Request failed: ' + status;
 }
 
 function getStatusPollDelay() {
@@ -1038,7 +1084,7 @@ function showEnrollModal(det, idx) {
       <h3>Name this ${cls}</h3>
       <div class="det-preview">${det.label} &mdash; ${Math.round(det.conf * 100)}% confidence</div>
       <label for="enrollModalName">Name</label>
-      <input id="enrollModalName" type="text" maxlength="32" placeholder="${isPet ? 'e.g. Mochi' : 'e.g. Ron'}" autofocus/>
+      <input id="enrollModalName" type="text" maxlength="32" placeholder="${isPet ? 'e.g. Mochi' : 'e.g. Ron'}"/>
       ${!isPet ? '<div style="font-size:11px;color:#888;margin-top:4px;">Requires face_recognition. The current live frame will be used.</div>' : ''}
       <div class="modal-actions">
         <button class="btn-cancel" type="button">Cancel</button>
@@ -1175,44 +1221,61 @@ async function enrollFace(evt) {
 // ── Identity panel ──────────────────────────────────────────────────────────
 const identityPanel = document.getElementById('identityPanel');
 const identityListEl = document.getElementById('identityList');
+const identityStatusEl = document.getElementById('identityStatus');
 
 async function refreshIdentityPanel({ signal } = {}) {
-  const d = await fetchJSON('/identity/labels', { signal });
+  const [d, status] = await Promise.all([
+    fetchJSON('/identity/labels', { signal }),
+    fetchJSON('/status', { signal }),
+  ]);
   const faces = d.faces || [];
   const pets = d.pets || {};
+  const petMatcher = status.pet_identity_matching || {};
   const hasAny = faces.length > 0 || Object.keys(pets).length > 0;
 
   identityPanel.classList.toggle('hidden', !hasAny && !d.identity_labeling_enabled);
   if (!hasAny) {
     identityListEl.innerHTML = '<span class="identity-empty">No identities enrolled yet. Click a bounding box in the live view to name it.</span>';
-    return;
-  }
+  } else {
+    let html = '';
+    for (const name of faces) {
+      html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
+    }
+    for (const [cls, name] of Object.entries(pets)) {
+      const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
+      html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
+    }
+    identityListEl.innerHTML = html;
 
-  let html = '';
-  for (const name of faces) {
-    html += `<span class="identity-chip">&#x1F9D1; ${esc(name)}<button class="remove-btn" data-name="${esc(name)}" data-cat="person" title="Remove">&times;</button></span>`;
-  }
-  for (const [cls, name] of Object.entries(pets)) {
-    const icon = cls === 'cat' ? '&#x1F431;' : '&#x1F436;';
-    html += `<span class="identity-chip">${icon} ${esc(name)} <small>(${cls})</small><button class="remove-btn" data-name="${esc(name)}" data-cat="${cls}" title="Remove">&times;</button></span>`;
-  }
-  identityListEl.innerHTML = html;
-
-  identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const cat = btn.dataset.cat;
-      const name = btn.dataset.name;
-      if (!confirm(`Remove "${name}"?`)) return;
-      try {
-        await fetchJSON('/identity/label', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, category: cat }),
-        });
-        requestIdentityRefresh();
-      } catch (e) { alert('Delete failed: ' + e.message); }
+    identityListEl.querySelectorAll('.remove-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cat = btn.dataset.cat;
+        const name = btn.dataset.name;
+        if (!confirm(`Remove "${name}"?`)) return;
+        try {
+          await fetchJSON('/identity/label', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, category: cat }),
+          });
+          requestIdentityRefresh();
+        } catch (e) { alert('Delete failed: ' + e.message); }
+      });
     });
-  });
+  }
+
+  const matcherCounts = petMatcher.pet_sample_counts || {};
+  const matcherNames = Object.entries(matcherCounts).map(([name, count]) => `${name}:${count}`);
+  const recentMatch = petMatcher.recent_match;
+  const recentText = recentMatch
+    ? `Recent pet match: ${recentMatch.matched ? recentMatch.identity_label : recentMatch.reason}`
+    : 'Recent pet match: none';
+  identityStatusEl.classList.remove('hidden');
+  identityStatusEl.textContent = [
+    `Pet matcher ${petMatcher.enabled ? 'ON' : 'OFF'}${petMatcher.reason ? ` (${petMatcher.reason})` : ''}`,
+    `Promoted pets: ${petMatcher.pet_identity_count || 0} identities / ${petMatcher.pet_sample_count || 0} samples${matcherNames.length ? ` [${matcherNames.join(', ')}]` : ''}`,
+    recentText,
+  ].join(' | ');
 }
 
 function esc(s) {

@@ -20,6 +20,7 @@ snapshots/
 .envrc
 .venv/
 venv/
+logs/
 .idea/
 .vscode/
 *.code-workspace
@@ -41,6 +42,10 @@ Thumbs.db
 *.p12
 *.pfx
 *.bak
+
+# Generated runtime data and promoted identity galleries
+data/
+faces/known_people/
 
 # ML models (large binaries – download on first run)
 *.pt

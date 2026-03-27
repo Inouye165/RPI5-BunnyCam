@@ -1,0 +1,760 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <title>BunnyCam Review Queue</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #f2f4f7;
+      --panel: #ffffff;
+      --panel-alt: #eef2f6;
+      --border: #d7dde5;
+      --text: #17202a;
+      --muted: #5f6b7a;
+      --accent: #1d4ed8;
+      --approve: #166534;
+      --reject: #b91c1c;
+      --chip: #f7f9fb;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      background: linear-gradient(180deg, #eef2f6 0%, #f8fafc 100%);
+      color: var(--text);
+    }
+    .page {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      padding: 16px;
+      gap: 12px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      backdrop-filter: blur(10px);
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .header p {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .header a {
+      text-decoration: none;
+      color: var(--accent);
+      font-weight: 700;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: var(--panel);
+    }
+    .header-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .version-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .content {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+      gap: 12px;
+      min-height: 0;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 14px;
+      min-height: 0;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+    .filters {
+      display: grid;
+      gap: 10px;
+    }
+    .filters label,
+    .editor label {
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    select,
+    input,
+    button {
+      font: inherit;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      background: var(--panel);
+    }
+    button {
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: 0.55;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .summary-card {
+      background: var(--panel-alt);
+      border-radius: 14px;
+      padding: 10px;
+    }
+    .summary-card strong {
+      display: block;
+      font-size: 18px;
+    }
+    .summary-card span {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .queue-list {
+      margin-top: 12px;
+      display: grid;
+      gap: 8px;
+      max-height: calc(100dvh - 280px);
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .queue-item {
+      width: 100%;
+      text-align: left;
+      background: var(--chip);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      display: grid;
+      gap: 4px;
+    }
+    .queue-item.active {
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--accent);
+      background: #eef4ff;
+    }
+    .queue-item small {
+      color: var(--muted);
+    }
+    .queue-item .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: #fff;
+      border: 1px solid var(--border);
+    }
+    .detail {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 12px;
+      min-height: 0;
+    }
+    .detail-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .detail-top h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .detail-top p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      background: #eef2f7;
+      color: var(--muted);
+    }
+    .state-pill[data-state="approved"] { background: #e8f7ec; color: var(--approve); }
+    .state-pill[data-state="rejected"] { background: #fdecec; color: var(--reject); }
+    .state-pill[data-state="unreviewed"] { background: #edf2ff; color: var(--accent); }
+    .detail-body {
+      display: grid;
+      grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+      gap: 12px;
+      min-height: 0;
+    }
+    .image-panel,
+    .meta-panel {
+      background: var(--panel-alt);
+      border-radius: 16px;
+      padding: 12px;
+      min-height: 0;
+    }
+    .image-frame {
+      min-height: 320px;
+      display: grid;
+      place-items: center;
+      background: #dfe7f0;
+      border-radius: 14px;
+      overflow: hidden;
+    }
+    .image-frame img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .image-frame.empty {
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .meta-card {
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .meta-card span {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .meta-card strong {
+      font-size: 14px;
+      word-break: break-word;
+    }
+    .editor {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .actions,
+    .nav-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .export-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      background: #edf3ff;
+      border: 1px solid #cbd9ff;
+      border-radius: 14px;
+    }
+    .export-strip strong {
+      font-size: 12px;
+    }
+    .export-status {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .promotion-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      background: #edf8f0;
+      border: 1px solid #cde7d4;
+      border-radius: 14px;
+    }
+    .promotion-strip strong {
+      font-size: 12px;
+    }
+    .actions .approve { background: #edf8f0; color: var(--approve); }
+    .actions .reject { background: #fff1f1; color: var(--reject); }
+    .actions .save { background: #edf3ff; color: var(--accent); }
+    .raw-meta {
+      margin: 0;
+      background: #0f172a;
+      color: #d9e2ec;
+      border-radius: 14px;
+      padding: 12px;
+      font-size: 12px;
+      overflow: auto;
+      max-height: 260px;
+    }
+    .empty-note {
+      color: var(--muted);
+      font-weight: 700;
+      padding: 18px 0;
+    }
+    @media (max-width: 960px) {
+      .content,
+      .detail-body {
+        grid-template-columns: 1fr;
+      }
+      .queue-list {
+        max-height: 280px;
+      }
+      .meta-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>Candidate Review Queue</h1>
+        <p>Review, label, approve, or reject Phase 1 candidate crops without leaving BunnyCam.</p>
+      </div>
+      <div class="header-tools">
+        <span class="version-pill">__APP_VERSION__</span>
+        <a href="/">Back To Live View</a>
+      </div>
+    </header>
+
+    <div class="content">
+      <aside class="panel">
+        <div class="filters">
+          <label>
+            Review state
+            <select id="stateFilter">
+              <option value="all">All states</option>
+              <option value="unreviewed" selected>Unreviewed</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </label>
+          <label>
+            Class
+            <select id="classFilter">
+              <option value="all">All classes</option>
+              <option value="person">Person</option>
+              <option value="dog">Dog</option>
+              <option value="cat">Cat</option>
+            </select>
+          </label>
+          <label>
+            Identity label
+            <select id="identityFilter">
+              <option value="all">All candidates</option>
+              <option value="missing">Missing label</option>
+              <option value="present">Has label</option>
+            </select>
+          </label>
+          <button id="reloadBtn" type="button">Refresh Queue</button>
+        </div>
+
+        <div class="summary">
+          <div class="summary-card"><strong id="summaryTotal">0</strong><span>Total</span></div>
+          <div class="summary-card"><strong id="summaryUnreviewed">0</strong><span>Unreviewed</span></div>
+          <div class="summary-card"><strong id="summaryApproved">0</strong><span>Approved</span></div>
+          <div class="summary-card"><strong id="summaryRejected">0</strong><span>Rejected</span></div>
+        </div>
+
+        <div id="queueList" class="queue-list"></div>
+      </aside>
+
+      <main class="panel detail">
+        <div class="detail-top">
+          <div>
+            <h2 id="detailTitle">Loading queue...</h2>
+            <p id="detailSubtitle">Review state and labels persist in candidate metadata.</p>
+          </div>
+          <div id="statePill" class="state-pill" data-state="unreviewed">unreviewed</div>
+        </div>
+
+        <div class="detail-body">
+          <section class="image-panel">
+            <div id="imageFrame" class="image-frame empty">No candidate selected</div>
+            <p id="frameLinkWrap" class="empty-note"></p>
+          </section>
+
+          <section class="meta-panel">
+            <div class="promotion-strip">
+              <strong>Identity gallery</strong>
+              <button id="promoteBtn" type="button">Promote Approved To Identity Gallery</button>
+              <span id="promotionStatus" class="export-status">Loading current gallery status...</span>
+            </div>
+
+            <div class="export-strip">
+              <strong>Reviewed export</strong>
+              <button id="exportBtn" type="button">Export Approved Dataset</button>
+              <span id="exportStatus" class="export-status">No export triggered yet.</span>
+            </div>
+
+            <div class="meta-grid">
+              <div class="meta-card"><span>Candidate</span><strong id="metaCandidateId">-</strong></div>
+              <div class="meta-card"><span>Captured</span><strong id="metaTimestamp">-</strong></div>
+              <div class="meta-card"><span>Detected Class</span><strong id="metaClass">-</strong></div>
+              <div class="meta-card"><span>Effective Class</span><strong id="metaEffectiveClass">-</strong></div>
+              <div class="meta-card"><span>Track</span><strong id="metaTrack">-</strong></div>
+              <div class="meta-card"><span>Confidence</span><strong id="metaConfidence">-</strong></div>
+            </div>
+
+            <div class="editor">
+              <label>
+                Identity label
+                <input id="identityLabelInput" type="text" maxlength="64" placeholder="Ron, Dobby, wife name"/>
+              </label>
+              <label>
+                Class correction
+                <select id="classCorrectionSelect">
+                  <option value="">Keep detected class</option>
+                  <option value="person">Person</option>
+                  <option value="dog">Dog</option>
+                  <option value="cat">Cat</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button id="saveBtn" class="save" type="button">Save</button>
+              <button id="saveNextBtn" class="save" type="button">Save Label + Next</button>
+              <button id="approveBtn" class="approve" type="button">Approve + Next</button>
+              <button id="rejectBtn" class="reject" type="button">Reject + Next</button>
+              <button id="clearLabelBtn" type="button">Clear Label</button>
+            </div>
+
+            <div class="nav-actions" style="margin: 12px 0;">
+              <button id="prevBtn" type="button">Previous</button>
+              <button id="nextBtn" type="button">Next</button>
+              <button id="leaveUnreviewedBtn" type="button">Leave Unreviewed</button>
+            </div>
+
+            <pre id="rawMetadata" class="raw-meta">{}</pre>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const stateFilter = document.getElementById('stateFilter');
+    const classFilter = document.getElementById('classFilter');
+    const identityFilter = document.getElementById('identityFilter');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const queueList = document.getElementById('queueList');
+    const detailTitle = document.getElementById('detailTitle');
+    const detailSubtitle = document.getElementById('detailSubtitle');
+    const statePill = document.getElementById('statePill');
+    const imageFrame = document.getElementById('imageFrame');
+    const frameLinkWrap = document.getElementById('frameLinkWrap');
+    const metaCandidateId = document.getElementById('metaCandidateId');
+    const metaTimestamp = document.getElementById('metaTimestamp');
+    const metaClass = document.getElementById('metaClass');
+    const metaEffectiveClass = document.getElementById('metaEffectiveClass');
+    const metaTrack = document.getElementById('metaTrack');
+    const metaConfidence = document.getElementById('metaConfidence');
+    const identityLabelInput = document.getElementById('identityLabelInput');
+    const classCorrectionSelect = document.getElementById('classCorrectionSelect');
+    const saveBtn = document.getElementById('saveBtn');
+    const saveNextBtn = document.getElementById('saveNextBtn');
+    const approveBtn = document.getElementById('approveBtn');
+    const rejectBtn = document.getElementById('rejectBtn');
+    const clearLabelBtn = document.getElementById('clearLabelBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const leaveUnreviewedBtn = document.getElementById('leaveUnreviewedBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const exportStatus = document.getElementById('exportStatus');
+    const promoteBtn = document.getElementById('promoteBtn');
+    const promotionStatus = document.getElementById('promotionStatus');
+    const rawMetadata = document.getElementById('rawMetadata');
+    const summaryTotal = document.getElementById('summaryTotal');
+    const summaryUnreviewed = document.getElementById('summaryUnreviewed');
+    const summaryApproved = document.getElementById('summaryApproved');
+    const summaryRejected = document.getElementById('summaryRejected');
+
+    let queueItems = [];
+    let currentIndex = -1;
+
+    function galleryStatusText(payload) {
+      const people = `${payload.people_identity_count || 0} people / ${payload.people_encoding_count || 0} encodings`;
+      const pets = `${payload.pet_identity_count || 0} pet identities / ${payload.pet_sample_count || 0} samples`;
+      const last = payload.last_promotion
+        ? `Last promote: +${payload.last_promotion.people_promoted || 0} people, +${payload.last_promotion.pet_promoted || 0} pets.`
+        : 'No promotion triggered yet.';
+      return `${people}. ${pets}. ${last}`;
+    }
+
+    async function loadGalleryStatus() {
+      try {
+        const response = await fetch('/api/review/identity-gallery-status');
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Identity gallery status unavailable.');
+        }
+        promotionStatus.textContent = galleryStatusText(payload);
+      } catch (error) {
+        promotionStatus.textContent = error.message || 'Identity gallery status unavailable.';
+      }
+    }
+
+    function currentItem() {
+      return queueItems[currentIndex] || null;
+    }
+
+    function setSummary(summary) {
+      summaryTotal.textContent = summary.total || 0;
+      summaryUnreviewed.textContent = summary.unreviewed || 0;
+      summaryApproved.textContent = summary.approved || 0;
+      summaryRejected.textContent = summary.rejected || 0;
+    }
+
+    function renderQueueList() {
+      queueList.innerHTML = '';
+      if (!queueItems.length) {
+        queueList.innerHTML = '<div class="empty-note">No candidates match the current filters.</div>';
+        return;
+      }
+
+      queueItems.forEach((item, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'queue-item' + (index === currentIndex ? ' active' : '');
+        button.innerHTML = `
+          <strong>${item.identity_label || item.effective_class_name || item.class_name}</strong>
+          <small>${item.timestamp || 'unknown time'}</small>
+          <div class="chips">
+            <span class="chip">${item.review_state}</span>
+            <span class="chip">${item.effective_class_name}</span>
+            <span class="chip">track ${item.track_id ?? '-'}</span>
+          </div>
+        `;
+        button.addEventListener('click', () => {
+          currentIndex = index;
+          renderCurrent();
+          renderQueueList();
+        });
+        queueList.appendChild(button);
+      });
+    }
+
+    function renderImage(item) {
+      if (!item || !item.crop_url) {
+        imageFrame.className = 'image-frame empty';
+        imageFrame.textContent = 'No candidate selected';
+        frameLinkWrap.textContent = '';
+        return;
+      }
+
+      imageFrame.className = 'image-frame';
+      imageFrame.innerHTML = `<img src="${item.crop_url}" alt="Candidate crop for ${item.candidate_id}"/>`;
+      if (item.frame_url) {
+        frameLinkWrap.innerHTML = `<a href="${item.frame_url}" target="_blank" rel="noreferrer">Open stored full-frame reference</a>`;
+      } else {
+        frameLinkWrap.textContent = 'No full-frame reference stored for this candidate.';
+      }
+    }
+
+    function renderCurrent() {
+      const item = currentItem();
+      const disabled = !item;
+
+      [saveBtn, saveNextBtn, approveBtn, rejectBtn, clearLabelBtn, prevBtn, nextBtn, leaveUnreviewedBtn, identityLabelInput, classCorrectionSelect]
+        .forEach((element) => { element.disabled = disabled; });
+
+      if (!item) {
+        detailTitle.textContent = 'No matching candidates';
+        detailSubtitle.textContent = 'Adjust filters or wait for new Phase 1 candidate crops.';
+        statePill.textContent = 'empty';
+        statePill.dataset.state = 'unreviewed';
+        metaCandidateId.textContent = '-';
+        metaTimestamp.textContent = '-';
+        metaClass.textContent = '-';
+        metaEffectiveClass.textContent = '-';
+        metaTrack.textContent = '-';
+        metaConfidence.textContent = '-';
+        identityLabelInput.value = '';
+        classCorrectionSelect.value = '';
+        rawMetadata.textContent = '{}';
+        renderImage(null);
+        return;
+      }
+
+      detailTitle.textContent = `${currentIndex + 1} of ${queueItems.length}`;
+      detailSubtitle.textContent = item.metadata_path || item.candidate_id;
+      statePill.textContent = item.review_state;
+      statePill.dataset.state = item.review_state;
+      metaCandidateId.textContent = item.candidate_id;
+      metaTimestamp.textContent = item.timestamp || '-';
+      metaClass.textContent = item.class_name || '-';
+      metaEffectiveClass.textContent = item.effective_class_name || '-';
+      metaTrack.textContent = item.track_id ? `${item.track_id} (${item.track_hits || 0} hits)` : '-';
+      metaConfidence.textContent = item.confidence ?? '-';
+      identityLabelInput.value = item.identity_label || '';
+      classCorrectionSelect.value = item.corrected_class_name || '';
+      rawMetadata.textContent = JSON.stringify(item, null, 2);
+      renderImage(item);
+    }
+
+    async function loadQueue(preferredCandidateId = null) {
+      const params = new URLSearchParams({
+        state: stateFilter.value,
+        class: classFilter.value,
+        identity: identityFilter.value,
+      });
+      const response = await fetch(`/api/review/candidates?${params.toString()}`);
+      const payload = await response.json();
+      queueItems = payload.items || [];
+      setSummary(payload.summary || {});
+
+      if (!queueItems.length) {
+        currentIndex = -1;
+      } else if (preferredCandidateId) {
+        const nextIndex = queueItems.findIndex((item) => item.candidate_id === preferredCandidateId);
+        currentIndex = nextIndex >= 0 ? nextIndex : 0;
+      } else if (currentIndex < 0 || currentIndex >= queueItems.length) {
+        currentIndex = 0;
+      }
+
+      renderQueueList();
+      renderCurrent();
+    }
+
+    async function updateCurrent(updatePayload, advanceMode = 'stay') {
+      const item = currentItem();
+      if (!item) {
+        return;
+      }
+
+      const nextPreferredId = advanceMode === 'next'
+        ? (queueItems[currentIndex + 1]?.candidate_id || queueItems[currentIndex - 1]?.candidate_id || null)
+        : item.candidate_id;
+
+      const response = await fetch(`/api/review/candidates/${item.candidate_id}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatePayload),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        alert(payload.error || 'Review update failed.');
+        return;
+      }
+
+      await loadQueue(nextPreferredId);
+    }
+
+    function buildEditorPayload() {
+      return {
+        identity_label: identityLabelInput.value,
+        corrected_class_name: classCorrectionSelect.value,
+      };
+    }
+
+    reloadBtn.addEventListener('click', () => loadQueue(currentItem()?.candidate_id || null));
+    stateFilter.addEventListener('change', () => loadQueue());
+    classFilter.addEventListener('change', () => loadQueue());
+    identityFilter.addEventListener('change', () => loadQueue());
+    prevBtn.addEventListener('click', () => {
+      if (currentIndex > 0) {
+        currentIndex -= 1;
+        renderQueueList();
+        renderCurrent();
+      }
+    });
+    nextBtn.addEventListener('click', () => {
+      if (currentIndex < queueItems.length - 1) {
+        currentIndex += 1;
+        renderQueueList();
+        renderCurrent();
+      }
+    });
+    leaveUnreviewedBtn.addEventListener('click', () => updateCurrent({ review_state: 'unreviewed', ...buildEditorPayload() }, 'next'));
+    saveBtn.addEventListener('click', () => updateCurrent(buildEditorPayload(), 'stay'));
+    saveNextBtn.addEventListener('click', () => updateCurrent(buildEditorPayload(), 'next'));
+    approveBtn.addEventListener('click', () => updateCurrent({ review_state: 'approved', ...buildEditorPayload() }, 'next'));
+    rejectBtn.addEventListener('click', () => updateCurrent({ review_state: 'rejected', ...buildEditorPayload() }, 'next'));
+    clearLabelBtn.addEventListener('click', () => {
+      identityLabelInput.value = '';
+      updateCurrent({ identity_label: '', corrected_class_name: classCorrectionSelect.value }, 'stay');
+    });
+    exportBtn.addEventListener('click', async () => {
+      exportBtn.disabled = true;
+      exportStatus.textContent = 'Exporting approved dataset...';
+      try {
+        const response = await fetch('/api/review/export', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Export failed.');
+        }
+        exportStatus.textContent = `Exported ${payload.exported_count} item(s) to ${payload.export_path}`;
+      } catch (error) {
+        exportStatus.textContent = error.message || 'Export failed.';
+      } finally {
+        exportBtn.disabled = false;
+      }
+    });
+
+    promoteBtn.addEventListener('click', async () => {
+      promoteBtn.disabled = true;
+      promotionStatus.textContent = 'Promoting approved reviewed samples into identity galleries...';
+      try {
+        const response = await fetch('/api/review/promote-identities', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Promotion failed.');
+        }
+        promotionStatus.textContent = `Promoted ${payload.people_promoted || 0} people sample(s) and ${payload.pet_promoted || 0} pet sample(s). ${galleryStatusText(payload.status || payload)}`;
+      } catch (error) {
+        promotionStatus.textContent = error.message || 'Promotion failed.';
+      } finally {
+        promoteBtn.disabled = false;
+      }
+    });
+
+    loadQueue();
+    loadGalleryStatus();
+  </script>
+</body>
+</html>

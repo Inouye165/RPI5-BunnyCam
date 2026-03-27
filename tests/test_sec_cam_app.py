@@ -129,12 +129,29 @@ def test_detections_route_reports_disabled_reason(monkeypatch):
 
 def test_status_route_includes_detection_state(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
     monkeypatch.setattr(module, "_detect", types.SimpleNamespace(
         get_status=lambda: {
             "detection_enabled": True,
             "detection_reason": None,
             "face_recognition_enabled": False,
             "face_recognition_reason": "face_recognition not installed",
+            "pet_identity_matching": {
+                "enabled": True,
+                "reason": None,
+                "pet_identity_count": 1,
+                "pet_sample_count": 3,
+                "pet_sample_counts": {"Dobby": 3},
+                "pet_class_sample_counts": {"dog": 3},
+                "thresholds": {"max_distance": 0.22, "min_margin": 0.06},
+                "recent_match": {"matched": True, "identity_label": "Dobby", "reason": "matched"},
+            },
+            "candidate_collection": {"enabled": True, "saved_total": 2, "saved_by_class": {"person": 2}},
             "model": "yolov8n",
         }
     ))
@@ -149,6 +166,296 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["detection_enabled"] is True
     assert payload["detection_model"] == "yolov8n"
     assert payload["face_recognition_enabled"] is False
+    assert payload["pet_identity_matching"]["enabled"] is True
+    assert payload["pet_identity_matching"]["pet_sample_counts"]["Dobby"] == 3
+    assert payload["candidate_collection"]["saved_total"] == 2
+    assert payload["app_version"]["display"] == "v0.3.0 (main@abc1234)"
+
+
+def test_version_endpoint(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "feat/phase-3-version-and-reviewed-export",
+        "commit": "bc86c20",
+        "display": "v0.3.0 (feat/phase-3-version-and-reviewed-export@bc86c20)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/version")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["version"] == "0.3.0"
+    assert payload["commit"] == "bc86c20"
+
+
+def test_candidate_collection_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_detect", types.SimpleNamespace(
+        get_status=lambda: {
+            "detection_enabled": True,
+            "detection_reason": None,
+            "face_recognition_enabled": False,
+            "face_recognition_reason": None,
+            "identity_labeling_enabled": True,
+            "candidate_collection": {
+                "enabled": True,
+                "saved_total": 4,
+                "saved_by_class": {"person": 2, "cat": 1, "dog": 1},
+            },
+            "model": "yolov8n",
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/candidate-collection/status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["enabled"] is True
+    assert payload["saved_total"] == 4
+    assert payload["saved_by_class"]["dog"] == 1
+
+
+def _make_review_item(**overrides):
+    payload = {
+        "candidate_id": "20260326T120000000000_person_t0001_s001",
+        "timestamp": "2026-03-26T12:00:00.000Z",
+        "class_name": "person",
+        "effective_class_name": "person",
+        "review_state": "unreviewed",
+        "identity_label": None,
+        "track_id": 1,
+        "track_hits": 3,
+        "confidence": 0.9,
+        "crop_path": "images/2026/03/26/sample.bmp",
+        "frame_path": None,
+        "metadata_path": "metadata/2026/03/26/sample.json",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_review_page_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/review")
+
+    assert response.status_code == 200
+    assert b"Candidate Review Queue" in response.data
+    assert b"v0.3.0 (main@abc1234)" in response.data
+
+
+def test_main_page_renders_version_badge(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"v0.3.0 (main@abc1234)" in response.data
+
+
+def test_review_candidates_list_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        list_candidates=lambda **_kwargs: {
+            "items": [_make_review_item()],
+            "total": 1,
+            "summary": {"total": 1, "unreviewed": 1, "approved": 0, "rejected": 0, "labeled": 0},
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/candidates?state=unreviewed&class=person&identity=missing")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["candidate_id"].startswith("20260326T")
+    assert payload["items"][0]["crop_url"].endswith("images/2026/03/26/sample.bmp")
+
+
+def test_review_candidate_approve_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(review_state="approved", identity_label="Ron")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-1/review", json={
+        "review_state": "approved",
+        "identity_label": "Ron",
+        "corrected_class_name": "person",
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["candidate"]["review_state"] == "approved"
+    assert calls == [("candidate-1", {
+        "review_state": "approved",
+        "identity_label": "Ron",
+        "corrected_class_name": "person",
+    })]
+
+
+def test_review_candidate_reject_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(review_state="rejected")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-2/review", json={"review_state": "rejected"})
+
+    assert response.status_code == 200
+    assert response.get_json()["candidate"]["review_state"] == "rejected"
+    assert calls == [("candidate-2", {"review_state": "rejected"})]
+
+
+def test_review_candidate_label_update_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    calls = []
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        update_candidate=lambda candidate_id, **kwargs: (
+            calls.append((candidate_id, kwargs)) or _make_review_item(identity_label="Dobby", effective_class_name="dog", class_name="dog")
+        )
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-3/review", json={
+        "identity_label": "Dobby",
+        "corrected_class_name": "dog",
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["candidate"]["identity_label"] == "Dobby"
+    assert calls == [("candidate-3", {"identity_label": "Dobby", "corrected_class_name": "dog"})]
+
+
+def test_review_export_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_review_exporter", types.SimpleNamespace(
+        export_reviewed_dataset=lambda **_kwargs: {
+            "export_name": "20260326_063500",
+            "export_path": "c:/Users/inouy/RPI5-BunnyCam/data/exports/reviewed/20260326_063500",
+            "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/exports/reviewed/20260326_063500/manifest.json",
+            "exported_count": 3,
+            "skipped_count": 1,
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/export")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["export_name"] == "20260326_063500"
+    assert payload["exported_count"] == 3
+    assert payload["manifest_path"].endswith("manifest.json")
+
+
+def test_review_training_dataset_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
+        get_status=lambda: {
+            "generated_at": "2026-03-26T07:20:00Z",
+            "package_name": "20260326_072000",
+            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "detection": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000/manifest.json",
+                "item_count": 2,
+                "class_counts": {"dog": 1, "person": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+            "identity": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000/manifest.json",
+                "item_count": 1,
+                "identity_counts": {"Ron": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/training-dataset-status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["package_name"] == "20260326_072000"
+    assert payload["detection"]["dataset_path"].startswith("data/training/detection/")
+    assert payload["identity"]["identity_counts"] == {"Ron": 1}
+
+
+def test_review_package_training_datasets_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
+        package_training_datasets=lambda **_kwargs: {
+            "generated_at": "2026-03-26T07:21:00Z",
+            "package_name": "20260326_072100",
+            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "detection": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100/manifest.json",
+                "item_count": 4,
+                "class_counts": {"dog": 2, "person": 2},
+                "validation": {"error_count": 0, "errors": []},
+            },
+            "identity": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100/manifest.json",
+                "item_count": 3,
+                "identity_counts": {"Dobby": 2, "Ron": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/package-training-datasets")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["detection"]["item_count"] == 4
+    assert payload["identity"]["dataset_path"].startswith("data/training/identity/")
 
 
 def test_detections_when_detect_module_unavailable(monkeypatch):
@@ -222,6 +529,16 @@ def _make_identity_detect_ns(**overrides):
             "face_recognition_reason": None,
             "identity_labeling_enabled": True,
             "pet_labels": {},
+            "pet_identity_matching": {
+                "enabled": False,
+                "reason": "pet identity matching unavailable",
+                "pet_identity_count": 0,
+                "pet_sample_count": 0,
+                "pet_sample_counts": {},
+                "pet_class_sample_counts": {},
+                "thresholds": {},
+                "recent_match": None,
+            },
             "known_faces": [],
             "model": "yolov8n",
         },
@@ -233,10 +550,83 @@ def _make_identity_detect_ns(**overrides):
         snapshot_enroll=lambda name, box: (True, f"Enrolled '{name}' from live frame"),
         remove_face=lambda name: (True, f"Removed '{name}'"),
         enroll_face=lambda name, data: (True, f"Enrolled '{name}'"),
+        reload_faces=lambda: None,
+        reload_pet_identities=lambda: None,
         list_faces=lambda: [],
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
+
+
+def test_review_identity_gallery_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_identity_promoter", types.SimpleNamespace(
+        get_status=lambda: {
+            "people_identity_count": 1,
+            "people_encoding_count": 2,
+            "people_encoding_counts": {"Ron": 2},
+            "pet_identity_count": 1,
+            "pet_sample_count": 3,
+            "pet_sample_counts": {"Dobby": 3},
+            "known_people_root": "c:/Users/inouy/RPI5-BunnyCam/faces/known_people",
+            "pet_gallery_root": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/pets",
+            "last_promotion_path": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/last_promotion.json",
+            "last_promotion": None,
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/identity-gallery-status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["people_identity_count"] == 1
+    assert payload["people_encoding_count"] == 2
+    assert payload["known_people_root"].endswith("faces/known_people")
+
+
+def test_review_promote_identities_route_reloads_faces(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    reload_calls = []
+    monkeypatch.setattr(module, "_identity_promoter", types.SimpleNamespace(
+        promote_approved_identities=lambda: {
+            "people_promoted": 2,
+            "pet_promoted": 1,
+            "people_duplicate_suppressed": 0,
+            "pet_duplicate_suppressed": 0,
+            "skipped_reasons": {},
+            "status": {
+                "people_identity_count": 1,
+                "people_encoding_count": 2,
+                "people_encoding_counts": {"Ron": 2},
+                "pet_identity_count": 1,
+                "pet_sample_count": 1,
+                "pet_sample_counts": {"Dobby": 1},
+                "known_people_root": "c:/Users/inouy/RPI5-BunnyCam/faces/known_people",
+                "pet_gallery_root": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/pets",
+                "last_promotion_path": "c:/Users/inouy/RPI5-BunnyCam/data/identity_gallery/last_promotion.json",
+                "last_promotion": None,
+            },
+        }
+    ))
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        reload_faces=lambda: reload_calls.append("reload"),
+        reload_pet_identities=lambda: reload_calls.append("reload_pet"),
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/promote-identities")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["people_promoted"] == 2
+    assert payload["pet_promoted"] == 1
+    assert payload["status"]["people_encoding_count"] == 2
+    assert reload_calls == ["reload", "reload_pet"]
 
 
 def test_identity_enroll_pet_cat(monkeypatch):
@@ -512,3 +902,51 @@ def test_identity_enroll_not_available_returns_clear_message(monkeypatch):
     payload = response.get_json()
     assert payload["ok"] is False
     assert "not available" in payload["error"]
+
+
+def test_identity_enroll_returns_json_for_unexpected_snapshot_error(monkeypatch):
+    """POST /identity/enroll should return JSON when live enrollment crashes."""
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    def boom(_name, _box):
+        raise TypeError("bad crop")
+
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        snapshot_enroll=boom,
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/identity/enroll", json={
+        "name": "Ron", "category": "person", "box": [0.1, 0.2, 0.5, 0.8],
+    })
+
+    assert response.status_code == 500
+    assert response.is_json is True
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error"] == "live enrollment failed: bad crop"
+
+
+def test_identity_enroll_returns_json_for_unexpected_pet_label_error(monkeypatch):
+    """POST /identity/enroll should return JSON when pet labeling crashes."""
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    def boom(_category, _name):
+        raise RuntimeError("pet label store offline")
+
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        set_pet_label=boom,
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/identity/enroll", json={
+        "name": "Mochi", "category": "cat", "box": [0.1, 0.2, 0.5, 0.8],
+    })
+
+    assert response.status_code == 500
+    assert response.is_json is True
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error"] == "live enrollment failed: pet label store offline"

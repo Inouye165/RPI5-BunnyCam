@@ -8,9 +8,16 @@ import subprocess
 from datetime import datetime
 from threading import Condition, Lock, Thread, Event
 from queue import Queue, Empty, Full
+from urllib.parse import quote
 
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
+from candidate_collection import encode_rgb_bmp
+from identity_gallery import ReviewedIdentityPromoter
+from reviewed_export import ReviewedDatasetExporter
+from review_queue import CandidateReviewQueue
+from training_dataset import TrainingDatasetPackager
+from version_info import get_app_version_info
 
 # --------------------
 # Paths
@@ -66,6 +73,9 @@ FOCUS_SWEEP_SETTLE_S     = 0.08 # per step: drain stale frame + lens settle (~2.
 SNAPSHOT_DIR = os.path.join(BASE_DIR, "snapshots")
 RECORD_DIR_H264 = os.path.join(BASE_DIR, "recordings")        # temp/raw segments
 RECORD_DIR_MP4 = os.path.join(BASE_DIR, "recordings_mp4")     # browser-playable segments
+CANDIDATE_DATA_DIR = os.path.join(BASE_DIR, "data", "candidates")
+EXPORT_DATA_DIR = os.path.join(BASE_DIR, "data", "exports")
+TRAINING_DATA_DIR = os.path.join(BASE_DIR, "data", "training")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(RECORD_DIR_H264, exist_ok=True)
 os.makedirs(RECORD_DIR_MP4, exist_ok=True)
@@ -811,6 +821,16 @@ def reconfig_worker():
 app = Flask(__name__)
 
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
+_review_queue = CandidateReviewQueue(CANDIDATE_DATA_DIR)
+_review_exporter = ReviewedDatasetExporter(CANDIDATE_DATA_DIR, EXPORT_DATA_DIR, review_queue=_review_queue)
+_training_packager = TrainingDatasetPackager(CANDIDATE_DATA_DIR, TRAINING_DATA_DIR, review_queue=_review_queue)
+_identity_promoter = ReviewedIdentityPromoter(
+    CANDIDATE_DATA_DIR,
+    os.path.join(BASE_DIR, "faces"),
+    os.path.join(BASE_DIR, "data", "identity_gallery"),
+    review_queue=_review_queue,
+)
+_app_version_info = get_app_version_info(BASE_DIR)
 
 
 def _load_template(name: str) -> str:
@@ -820,11 +840,21 @@ def _load_template(name: str) -> str:
 
 
 INDEX_HTML = _load_template("index.html")
+REVIEW_HTML = _load_template("review.html")
+
+
+def _render_html(template_text: str) -> str:
+    return template_text.replace("__APP_VERSION__", _app_version_info["display"])
 
 
 @app.get("/")
 def index():
-    return INDEX_HTML
+    return _render_html(INDEX_HTML)
+
+
+@app.get("/review")
+def review_page():
+    return _render_html(REVIEW_HTML)
 
 
 @app.get("/favicon.svg")
@@ -861,8 +891,14 @@ def status():
         payload = dict(motion_state)
     payload["backend"] = _selected_backend_name()
     payload["runtime_initialized"] = runtime_state["runtime_initialized"]
+    payload["app_version"] = dict(_app_version_info)
     payload.update(_detection_status_payload())
     return jsonify(payload)
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify(dict(_app_version_info))
 
 
 def _selected_backend_name():
@@ -882,6 +918,21 @@ def _detection_status_payload():
             "face_recognition_enabled": False,
             "face_recognition_reason": "detect module unavailable",
             "identity_labeling_enabled": False,
+            "pet_identity_matching": {
+                "enabled": False,
+                "reason": "pet identity matching unavailable",
+                "pet_identity_count": 0,
+                "pet_sample_count": 0,
+                "pet_sample_counts": {},
+                "pet_class_sample_counts": {},
+                "thresholds": {},
+                "recent_match": None,
+            },
+            "candidate_collection": {
+                "enabled": False,
+                "saved_total": 0,
+                "saved_by_class": {},
+            },
         }
 
     detect_status = _detect.get_status()
@@ -892,7 +943,99 @@ def _detection_status_payload():
         "face_recognition_enabled": bool(detect_status.get("face_recognition_enabled", False)),
         "face_recognition_reason": detect_status.get("face_recognition_reason"),
         "identity_labeling_enabled": bool(detect_status.get("identity_labeling_enabled", False)),
+        "pet_identity_matching": detect_status.get("pet_identity_matching", {
+            "enabled": False,
+            "reason": "pet identity matching unavailable",
+            "pet_identity_count": 0,
+            "pet_sample_count": 0,
+            "pet_sample_counts": {},
+            "pet_class_sample_counts": {},
+            "thresholds": {},
+            "recent_match": None,
+        }),
+        "candidate_collection": detect_status.get("candidate_collection", {
+            "enabled": False,
+            "saved_total": 0,
+            "saved_by_class": {},
+        }),
     }
+
+
+def _review_candidate_with_urls(candidate: dict) -> dict:
+    payload = dict(candidate)
+    crop_path = candidate.get("crop_path")
+    frame_path = candidate.get("frame_path")
+    payload["crop_url"] = (
+        f"/candidate-collection/assets/{quote(str(crop_path), safe='/')}" if crop_path else None
+    )
+    payload["frame_url"] = (
+        f"/candidate-collection/assets/{quote(str(frame_path), safe='/')}" if frame_path else None
+    )
+    return payload
+
+
+def _to_repo_relative_path(path: str) -> str:
+    return os.path.relpath(path, BASE_DIR).replace(os.sep, "/")
+
+
+def _identity_gallery_payload_with_paths(payload: dict) -> dict:
+    rendered = dict(payload)
+    for key in ("known_people_root", "pet_gallery_root", "last_promotion_path"):
+        value = rendered.get(key)
+        if isinstance(value, str) and value:
+            rendered[key] = _to_repo_relative_path(value)
+
+    last_promotion = rendered.get("last_promotion")
+    if isinstance(last_promotion, dict):
+        nested = dict(last_promotion)
+        for key in ("known_people_root", "pet_gallery_root", "last_promotion_path"):
+            value = nested.get(key)
+            if isinstance(value, str) and value:
+                nested[key] = _to_repo_relative_path(value)
+        rendered["last_promotion"] = nested
+
+    status_payload = rendered.get("status")
+    if isinstance(status_payload, dict):
+        rendered["status"] = _identity_gallery_payload_with_paths(status_payload)
+
+    return rendered
+
+
+def _training_dataset_payload_with_paths(payload: dict) -> dict:
+    def _render(value, key: str | None = None):
+        if isinstance(value, dict):
+            return {nested_key: _render(nested_value, nested_key) for nested_key, nested_value in value.items()}
+        if isinstance(value, list):
+            return [_render(item, key) for item in value]
+        if isinstance(value, str) and key and key.endswith(("_path", "_root")) and os.path.isabs(value):
+            return _to_repo_relative_path(value)
+        return value
+
+    return _render(dict(payload))
+
+
+def _read_ppm_asset(asset_path: str) -> np.ndarray:
+    with open(asset_path, "rb") as ppm_file:
+        magic = ppm_file.readline().strip()
+        if magic != b"P6":
+            raise ValueError("unsupported PPM format")
+
+        header_tokens: list[bytes] = []
+        while len(header_tokens) < 3:
+            line = ppm_file.readline()
+            if not line:
+                raise ValueError("invalid PPM header")
+            if line.startswith(b"#"):
+                continue
+            header_tokens.extend(line.split())
+
+        width, height, max_value = [int(token) for token in header_tokens[:3]]
+        if max_value != 255:
+            raise ValueError("unsupported PPM max value")
+        pixel_bytes = ppm_file.read(width * height * 3)
+        if len(pixel_bytes) != width * height * 3:
+            raise ValueError("truncated PPM data")
+    return np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((height, width, 3))
 
 
 def _camera_config_payload():
@@ -1111,6 +1254,105 @@ def detections_get():
     })
 
 
+@app.get("/candidate-collection/status")
+def candidate_collection_status():
+    detection_status = _detection_status_payload()
+    return jsonify(detection_status["candidate_collection"])
+
+
+@app.get("/candidate-collection/assets/<path:asset_path>")
+def candidate_collection_asset(asset_path):
+    try:
+        absolute_path = _review_queue.resolve_asset_path(asset_path)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "asset not found"}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    if absolute_path.lower().endswith(".ppm"):
+        try:
+            rgb_image = _read_ppm_asset(absolute_path)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return Response(encode_rgb_bmp(rgb_image), mimetype="image/bmp")
+
+    directory, filename = os.path.split(absolute_path)
+    return send_from_directory(directory, filename, as_attachment=False)
+
+
+@app.get("/api/review/candidates")
+def review_candidates_list():
+    payload = _review_queue.list_candidates(
+        review_state=request.args.get("state"),
+        class_name=request.args.get("class"),
+        identity_filter=request.args.get("identity", "all"),
+    )
+    payload["items"] = [_review_candidate_with_urls(item) for item in payload["items"]]
+    return jsonify(payload)
+
+
+@app.post("/api/review/candidates/<candidate_id>/review")
+def review_candidate_update(candidate_id):
+    data = request.get_json(silent=True) or {}
+    update_kwargs = {}
+    if "review_state" in data:
+        update_kwargs["review_state"] = data.get("review_state")
+    if "identity_label" in data:
+        update_kwargs["identity_label"] = data.get("identity_label")
+    if "corrected_class_name" in data:
+        update_kwargs["corrected_class_name"] = data.get("corrected_class_name")
+
+    try:
+        payload = _review_queue.update_candidate(candidate_id, **update_kwargs)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "candidate not found"}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    return jsonify({"ok": True, "candidate": _review_candidate_with_urls(payload)})
+
+
+@app.post("/api/review/export")
+def review_export():
+    payload = _review_exporter.export_reviewed_dataset(version_info=dict(_app_version_info))
+    return jsonify({
+        "ok": True,
+        "export_name": payload["export_name"],
+        "export_path": _to_repo_relative_path(payload["export_path"]),
+        "manifest_path": _to_repo_relative_path(payload["manifest_path"]),
+        "exported_count": payload["exported_count"],
+        "skipped_count": payload["skipped_count"],
+    })
+
+
+@app.get("/api/review/training-dataset-status")
+def review_training_dataset_status():
+    payload = _training_packager.get_status()
+    return jsonify({"ok": True, **_training_dataset_payload_with_paths(payload)})
+
+
+@app.post("/api/review/package-training-datasets")
+def review_package_training_datasets():
+    payload = _training_packager.package_training_datasets(version_info=dict(_app_version_info))
+    return jsonify({"ok": True, **_training_dataset_payload_with_paths(payload)})
+
+
+@app.get("/api/review/identity-gallery-status")
+def review_identity_gallery_status():
+    payload = _identity_promoter.get_status()
+    return jsonify({"ok": True, **_identity_gallery_payload_with_paths(payload)})
+
+
+@app.post("/api/review/promote-identities")
+def review_promote_identities():
+    payload = _identity_promoter.promote_approved_identities()
+    if payload.get("people_promoted") and _detect is not None and hasattr(_detect, "reload_faces"):
+        _detect.reload_faces()
+    if payload.get("pet_promoted") and _detect is not None and hasattr(_detect, "reload_pet_identities"):
+        _detect.reload_pet_identities()
+    return jsonify({"ok": True, **_identity_gallery_payload_with_paths(payload)})
+
+
 @app.get("/face/list")
 def face_list():
     if _detect is None:
@@ -1148,13 +1390,20 @@ def identity_enroll():
     if not box or not isinstance(box, list) or len(box) != 4:
         return jsonify({"ok": False, "error": "box required (4 floats)"}), 400
 
-    if category in ("cat", "dog"):
-        ok, msg = _detect.set_pet_label(category, name)
-    elif category == "person":
-        ok, msg = _detect.snapshot_enroll(name, box)
-    else:
-        return jsonify({"ok": False,
-                        "error": f"unsupported category '{category}'"}), 400
+    try:
+        if category in ("cat", "dog"):
+            ok, msg = _detect.set_pet_label(category, name)
+        elif category == "person":
+            ok, msg = _detect.snapshot_enroll(name, box)
+        else:
+            return jsonify({"ok": False,
+                            "error": f"unsupported category '{category}'"}), 400
+    except Exception as exc:  # pragma: no cover  # pylint: disable=broad-exception-caught
+        logger.exception("identity enrollment failed for category '%s'", category)
+        return jsonify({
+            "ok": False,
+            "error": f"live enrollment failed: {exc}",
+        }), 500
 
     if ok:
         return jsonify({"ok": True, "message": msg})
@@ -1167,10 +1416,10 @@ def identity_labels():
     if _detect is None:
         return jsonify({"faces": [], "pets": {},
                         "identity_labeling_enabled": False})
-    status = _detect.get_status()
+    detect_status = _detect.get_status()
     return jsonify({
-        "faces": status.get("known_faces", []),
-        "pets": status.get("pet_labels", {}),
+        "faces": detect_status.get("known_faces", []),
+        "pets": detect_status.get("pet_labels", {}),
         "identity_labeling_enabled": True,
     })
 

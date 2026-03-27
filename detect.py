@@ -35,7 +35,13 @@ from typing import Callable
 
 import numpy as np
 
+from candidate_collection import CandidateCollector, CandidateCollectorConfig
+from identity_gallery import load_known_face_gallery
+from pet_identity import PetIdentityMatcher
+
 logger = logging.getLogger(__name__)
+
+BASE_DIR = os.path.dirname(__file__)
 
 # ── tunables ──────────────────────────────────────────────────────────────────
 DETECT_FPS   = 2.0   # detections per second
@@ -55,12 +61,16 @@ TRACK_MAX_MISS       = 8
 # at least this margin before we overwrite an existing confirmed identity.
 # 0.08 prevents name-flipping on small frame-to-frame distance fluctuations.
 TRACK_RELABEL_MARGIN = 0.08
+PET_MATCH_MIN_TRACK_HITS = 3
+PET_MATCH_GRACE_FRAMES = 3
+PET_MATCH_SWITCH_MARGIN = 0.08
 
 # COCO-80 class IDs we care about
 WATCH_CLASSES: dict[int, str] = {0: "person", 15: "cat", 16: "dog"}
 
 FACES_DIR = os.path.join(os.path.dirname(__file__), "faces")
 LABELS_FILE = os.path.join(FACES_DIR, "labels.json")
+CANDIDATE_ROOT = os.path.join(BASE_DIR, "data", "candidates")
 
 # ── module-level state ────────────────────────────────────────────────────────
 _lock        = threading.Lock()
@@ -68,8 +78,14 @@ _models: dict = {"yolo": None, "fr": None}
 _known_names: list[str]       = []
 _known_encs:  list[np.ndarray] = []
 _pet_labels:  dict[str, str]  = {}   # class → pet name  ("cat" → "Mochi")
+_face_gallery_status: dict = {
+    "people_identity_count": 0,
+    "people_encoding_count": 0,
+    "people_encoding_counts": {},
+}
+_pet_identity_matcher = PetIdentityMatcher(os.path.join(BASE_DIR, "data", "identity_gallery"))
+_frame_state: dict = {"latest_frame": None}
 _latest: dict = {"detections": [], "ts": 0.0, "model": "none"}
-_latest_frame: np.ndarray | None = None
 _status: dict = {
     "detection_enabled": False,
     "detection_reason": "YOLO model not loaded yet",
@@ -77,9 +93,10 @@ _status: dict = {
     "face_recognition_reason": "face_recognition not loaded",
 }
 _stop         = threading.Event()
+_candidate_collector = CandidateCollector(CANDIDATE_ROOT, CandidateCollectorConfig())
 
 
-# ── lightweight person tracker ────────────────────────────────────────────────
+# ── lightweight detection tracker ─────────────────────────────────────────────
 
 def _iou(a: list[float], b: list[float]) -> float:
     """Intersection-over-Union of two [x1,y1,x2,y2] normalised boxes."""
@@ -105,34 +122,39 @@ def _centre_dist(a: list[float], b: list[float]) -> float:
     return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
 
 
-class _PersonTracker:
-    """Stateful frame-to-frame tracker for person detections only.
+class _DetectionTracker:
+    """Stateful frame-to-frame tracker for watched detections.
 
-    Each detected person is assigned a stable *track_id* that persists across
-    frames as long as the person stays in view (within TRACK_MAX_MISS misses).
+    Each watched detection is assigned a stable *track_id* that persists across
+    frames as long as it stays in view (within TRACK_MAX_MISS misses).
 
-    Identity labels are made sticky:
-    - Once a track has a confirmed name it keeps it through frames where face
-      recognition fails to fire.
+    Person identity labels are made sticky:
+    - Once a person track has a confirmed name it keeps it through frames where
+      face recognition fails to fire.
     - A new recognition result only overwrites the name if it beats the stored
-      best face distance by TRACK_RELABEL_MARGIN — small fluctuations are
+      best face distance by TRACK_RELABEL_MARGIN; small fluctuations are
       ignored.
+
+    Cats and dogs also receive stable track IDs so downstream consumers can do
+    low-cost per-track gating without adding a second tracker.
     """
 
     def __init__(self) -> None:
         self._next_id: int = 1
         # Each track is a plain dict with keys:
-        #   track_id, box, label, label_source ("face"|"default"),
-        #   best_dist (lowest face distance seen), miss_count, last_seen
+        #   track_id, class, box, label, label_source, best_dist,
+        #   miss_count, last_seen, track_hits, pet_grace_remaining,
+        #   pet_identity_score
         self._tracks: list[dict] = []
 
     # ------------------------------------------------------------------
-    def update(self, person_dets: list[dict]) -> None:
-        """Match *person_dets* to existing tracks; mutate each in-place.
+    def update(self, detections: list[dict]) -> None:
+        """Match *detections* to existing tracks; mutate each in-place.
 
         After this call every det will have:
         - ``track_id``  – stable integer ID
-        - ``label``     – sticky identity label (name or "person")
+        - ``track_hits`` – number of matched frames seen for that track
+        - ``label``     – sticky identity label for people; current label for pets
         The internal ``_face_dist`` key is consumed here and removed."""
 
         now = time.time()
@@ -140,11 +162,14 @@ class _PersonTracker:
         matched_det_idxs:  set[int] = set()
 
         # ── greedy IoU matching ───────────────────────────────────────────
-        for det_i, det in enumerate(person_dets):
+        for det_i, det in enumerate(detections):
+            det_class = det.get("class", "")
             best_iou    = 0.0
             best_track  = None
             for track in self._tracks:
                 if track["track_id"] in matched_track_ids:
+                    continue
+                if track["class"] != det_class:
                     continue
                 iou = _iou(det["box"], track["box"])
                 if iou > best_iou:
@@ -163,6 +188,8 @@ class _PersonTracker:
             for track in self._tracks:
                 if track["track_id"] in matched_track_ids:
                     continue
+                if track["class"] != det_class:
+                    continue
                 cd = _centre_dist(det["box"], track["box"])
                 if cd < best_cdist:
                     best_cdist    = cd
@@ -175,20 +202,32 @@ class _PersonTracker:
                 continue
 
             # ── new track ─────────────────────────────────────────────────
-            raw_label  = det.get("label", "person")
+            raw_label  = det.get("label", det_class or "object")
             raw_dist   = det.pop("_face_dist", 1.0)
+            det.pop("_pet_match", None)
+            det.pop("_pet_matcher_active", None)
             new_track  = {
                 "track_id":     self._next_id,
+                "class":        det_class,
                 "box":          det["box"][:],
                 "label":        raw_label,
-                "label_source": "face" if raw_label != "person" else "default",
-                "best_dist":    raw_dist if raw_label != "person" else 1.0,
+                "label_source": (
+                    "face"
+                    if det_class == "person" and raw_label != "person"
+                    else "manual" if det_class in {"cat", "dog"} and raw_label != det_class else "default"
+                ),
+                "best_dist":    raw_dist if det_class == "person" and raw_label != "person" else 1.0,
                 "miss_count":   0,
                 "last_seen":    now,
+                "track_hits":   1,
+                "pet_grace_remaining": 0,
+                "pet_identity_score": 0.0,
             }
             self._next_id += 1
             self._tracks.append(new_track)
             det["track_id"] = new_track["track_id"]
+            det["track_hits"] = new_track["track_hits"]
+            det["label"] = new_track["label"]
             matched_det_idxs.add(det_i)
 
         # ── age unmatched tracks ──────────────────────────────────────────
@@ -205,11 +244,13 @@ class _PersonTracker:
         track["box"]        = det["box"][:]
         track["miss_count"] = 0
         track["last_seen"]  = now
+        track["track_hits"] += 1
 
-        new_label = det.get("label", "person")
+        det_class = det.get("class", "")
+        new_label = det.get("label", det_class or "object")
         new_dist  = det.pop("_face_dist", 1.0)
 
-        if new_label != "person":
+        if det_class == "person" and new_label != "person":
             # Face recognition fired this frame.
             if track["label_source"] == "default":
                 # First confirmed name — accept immediately.
@@ -221,10 +262,50 @@ class _PersonTracker:
                 track["label"]     = new_label
                 track["best_dist"] = new_dist
             # else: keep current sticky label (ignore small fluctuations)
+        elif det_class in {"cat", "dog"}:
+            pet_match = det.pop("_pet_match", None)
+            matcher_active = bool(det.pop("_pet_matcher_active", False))
+            if not matcher_active:
+                track["label"] = new_label
+                track["label_source"] = "manual" if new_label != det_class else "default"
+                track["pet_grace_remaining"] = 0
+                track["pet_identity_score"] = 0.0
+            elif pet_match and pet_match.get("matched") and track["track_hits"] >= PET_MATCH_MIN_TRACK_HITS:
+                match_label = str(pet_match.get("identity_label") or "").strip() or det_class
+                match_score = float(pet_match.get("score") or 0.0)
+                current_score = float(track.get("pet_identity_score") or 0.0)
+                if track["label_source"] != "pet_match":
+                    track["label"] = match_label
+                    track["label_source"] = "pet_match"
+                    track["pet_identity_score"] = match_score
+                    track["pet_grace_remaining"] = PET_MATCH_GRACE_FRAMES
+                elif track["label"] == match_label:
+                    track["pet_identity_score"] = max(current_score, match_score)
+                    track["pet_grace_remaining"] = PET_MATCH_GRACE_FRAMES
+                elif match_score >= current_score + PET_MATCH_SWITCH_MARGIN:
+                    track["label"] = match_label
+                    track["pet_identity_score"] = match_score
+                    track["pet_grace_remaining"] = PET_MATCH_GRACE_FRAMES
+                elif track.get("pet_grace_remaining", 0) > 0:
+                    track["pet_grace_remaining"] -= 1
+                else:
+                    track["label"] = det_class
+                    track["label_source"] = "default"
+                    track["pet_identity_score"] = 0.0
+            elif track["label_source"] == "pet_match" and track.get("pet_grace_remaining", 0) > 0:
+                track["pet_grace_remaining"] -= 1
+            else:
+                track["label"] = det_class
+                track["label_source"] = "default"
+                track["pet_identity_score"] = 0.0
+                track["pet_grace_remaining"] = 0
+        elif det_class != "person":
+            track["label"] = new_label
 
         # Always propagate current track label to the detection dict.
         det["label"]    = track["label"]
         det["track_id"] = track["track_id"]
+        det["track_hits"] = track["track_hits"]
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
@@ -234,7 +315,7 @@ class _PersonTracker:
 
 
 # Module-level tracker instance — lives for the lifetime of the process.
-_tracker = _PersonTracker()
+_tracker = _DetectionTracker()
 
 
 # ── model / face loading ──────────────────────────────────────────────────────
@@ -275,21 +356,13 @@ def _load_faces() -> None:
         return
 
     os.makedirs(FACES_DIR, exist_ok=True)
-    names: list[str]        = []
-    encs:  list[np.ndarray] = []
-
+    names: list[str] = []
+    encs: list[np.ndarray] = []
     for fname in sorted(os.listdir(FACES_DIR)):
         path = os.path.join(FACES_DIR, fname)
         stem = os.path.splitext(fname)[0]
 
-        if fname.lower().endswith(".npy"):
-            try:
-                encs.append(np.load(path))
-                names.append(stem)
-            except (OSError, ValueError) as exc:
-                logger.warning("detect: could not load %s — %s", fname, exc)
-
-        elif fname.lower().endswith((".jpg", ".jpeg", ".png")):
+        if fname.lower().endswith((".jpg", ".jpeg", ".png")):
             npy = os.path.join(FACES_DIR, stem + ".npy")
             if os.path.exists(npy):
                 continue  # already encoded
@@ -298,17 +371,19 @@ def _load_faces() -> None:
                 found = fr.face_encodings(img)
                 if found:
                     np.save(npy, found[0])
-                    names.append(stem)
-                    encs.append(found[0])
                     logger.info("detect: auto-encoded face '%s'", stem)
                 else:
                     logger.warning("detect: no face found in %s", fname)
             except (OSError, ValueError, RuntimeError) as exc:
                 logger.warning("detect: error encoding %s — %s", fname, exc)
 
+    names, encs, gallery_status = load_known_face_gallery(FACES_DIR)
+
     with _lock:
         _known_names[:] = names
         _known_encs[:]  = encs
+        _face_gallery_status.clear()
+        _face_gallery_status.update(gallery_status)
     _set_face_status(True, None)
     logger.info("detect: loaded %d face(s): %s", len(names), names)
 
@@ -317,13 +392,13 @@ def _load_faces() -> None:
 
 def _load_pet_labels() -> None:
     """Load pet labels from faces/labels.json."""
-    global _pet_labels
     if os.path.isfile(LABELS_FILE):
         try:
             with open(LABELS_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                _pet_labels = data
+                _pet_labels.clear()
+                _pet_labels.update(data)
                 logger.info("detect: loaded pet labels %s", _pet_labels)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("detect: could not load labels.json — %s", exc)
@@ -334,6 +409,32 @@ def _save_pet_labels() -> None:
     os.makedirs(FACES_DIR, exist_ok=True)
     with open(LABELS_FILE, "w", encoding="utf-8") as fh:
         json.dump(_pet_labels, fh, indent=2)
+
+
+def _load_pet_identities() -> None:
+    status = _pet_identity_matcher.load_gallery()
+    if status.get("enabled"):
+        logger.info(
+            "detect: loaded %d promoted pet sample(s) across %d identity(ies)",
+            status.get("pet_sample_count", 0),
+            status.get("pet_identity_count", 0),
+        )
+    else:
+        logger.info("detect: pet identity matching disabled — %s", status.get("reason"))
+
+
+def _crop_from_box(frame_rgb: np.ndarray, box: list[float]) -> np.ndarray | None:
+    height, width = frame_rgb.shape[:2]
+    x1 = max(0, int(box[0] * width))
+    y1 = max(0, int(box[1] * height))
+    x2 = min(width, int(box[2] * width))
+    y2 = min(height, int(box[3] * height))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = frame_rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    return crop
 
 
 # ── per-frame inference ───────────────────────────────────────────────────────
@@ -369,8 +470,22 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
         logger.debug("detect: YOLO error — %s", exc)
         return dets
 
-    # ── pet labels ────────────────────────────────────────────────────────────────────
+    # ── pet labels / lightweight promoted-gallery matching ────────────────────────────
     for d in dets:
+        if d["class"] in {"cat", "dog"} and _pet_identity_matcher.is_enabled_for_class(d["class"]):
+            d["_pet_matcher_active"] = True
+            crop = _crop_from_box(frame_rgb, d["box"])
+            d["_pet_match"] = _pet_identity_matcher.match(d["class"], crop) if crop is not None else {
+                "class_name": d["class"],
+                "matched": False,
+                "identity_label": None,
+                "distance": None,
+                "margin": None,
+                "score": 0.0,
+                "reason": "invalid_crop",
+            }
+            d["label"] = d["class"]
+            continue
         pet_name = _pet_labels.get(d["class"])
         if pet_name:
             d["label"] = pet_name
@@ -378,6 +493,8 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     # ── face recognition ──────────────────────────────────────────────────────────────
     fr = _models["fr"]
     person_dets = [d for d in dets if d["class"] == "person"]
+    for person_det in person_dets:
+        person_det["face_visible"] = None
 
     if person_dets and fr is not None:
         with _lock:
@@ -408,6 +525,7 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
                                 ((d["box"][0] + d["box"][2]) / 2 - cx) ** 2
                                 + ((d["box"][1] + d["box"][3]) / 2 - cy) ** 2,
                         )
+                        nearest["face_visible"] = True
                         nearest["label"]      = name
                         # Store recognition distance for tracker hysteresis.
                         # Consumed + stripped by _tracker.update() below.
@@ -419,7 +537,7 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     # ── tracker: assign stable track_ids + sticky identity labels ─────────────
     # Called for every frame regardless of whether face recognition fired,
     # so that sticky labels survive frames with no face match.
-    _tracker.update(person_dets)
+    _tracker.update(dets)
 
     # Strip any remaining internal key (safety net).
     for d in person_dets:
@@ -436,16 +554,22 @@ def _worker(get_frame_fn: Callable) -> None:
     _load_yolo()
     _load_faces()
     _load_pet_labels()
+    _load_pet_identities()
 
-    global _latest_frame
     interval = 1.0 / DETECT_FPS
     while not _stop.is_set():
         t0 = time.time()
         try:
             frame = get_frame_fn()
             if frame is not None:
-                _latest_frame = frame
+                _frame_state["latest_frame"] = frame
                 dets = _run(frame)
+                _candidate_collector.collect(
+                    frame,
+                    dets,
+                    frame_source="detect_worker",
+                    captured_at=time.time(),
+                )
                 with _lock:
                     _latest["detections"] = dets
                     _latest["ts"]         = time.time()
@@ -480,6 +604,7 @@ def get_detections() -> dict:
 def get_status() -> dict:
     """Return detection, face-recognition, and identity-labeling readiness."""
     with _lock:
+        pet_identity_status = _pet_identity_matcher.get_status()
         return {
             "detection_enabled": bool(_status["detection_enabled"]),
             "detection_reason": _status["detection_reason"],
@@ -487,19 +612,28 @@ def get_status() -> dict:
             "face_recognition_reason": _status["face_recognition_reason"],
             "identity_labeling_enabled": True,
             "pet_labels": dict(_pet_labels),
-            "known_faces": list(_known_names),
+            "pet_identity_matching": pet_identity_status,
+            "known_faces": sorted(set(_known_names), key=str.lower),
+            "known_face_counts": dict(_face_gallery_status.get("people_encoding_counts", {})),
+            "known_face_samples": int(_face_gallery_status.get("people_encoding_count", 0)),
             "model": _latest.get("model", "none"),
+            "candidate_collection": _candidate_collector.get_status(),
         }
 
 
 def list_faces() -> list[str]:
     with _lock:
-        return list(_known_names)
+        return sorted(set(_known_names), key=str.lower)
 
 
 def reload_faces() -> None:
     """Hot-reload face encodings from disk (thread-safe)."""
     _load_faces()
+
+
+def reload_pet_identities() -> None:
+    """Hot-reload promoted pet gallery descriptors from disk."""
+    _load_pet_identities()
 
 
 def enroll_face(name: str, image_bytes: bytes) -> tuple[bool, str]:
@@ -584,7 +718,7 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
         return False, ("face_recognition not installed "
                        "— cannot enroll person from live frame")
 
-    frame = _latest_frame
+    frame = _frame_state.get("latest_frame")
     if frame is None:
         return False, "no live frame available yet"
 

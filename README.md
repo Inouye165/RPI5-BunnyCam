@@ -12,6 +12,7 @@ Primary capabilities:
 - Motion detection using a low-resolution analysis stream
 - Snapshot capture on motion events
 - Rolling H.264 recording with MP4 conversion for playback
+- Conservative candidate image collection for stable person, dog, and cat tracks
 - Browser controls for ROI selection, sensitivity, and rotation
 - Camera Module 3 autofocus support when the connected camera exposes libcamera autofocus controls
 
@@ -70,11 +71,28 @@ CAMERA_BACKEND=laptop python sec_cam.py
 Recommended Windows local startup from the repo root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
 .\start_local.ps1
 ```
 
+That path now handles the full local startup flow:
+
+- verifies or installs `requirements.txt`
+- starts `sec_cam.py` in the background
+- checks `http://127.0.0.1:8001/status` until healthy
+- monitors the process briefly for early crash behavior
+- writes runtime state for deterministic shutdown
+- appends a timestamped result entry with hostname to `STARTUP_RESULTS.md`
+- refreshes the startup markdown lifecycle and dependency-version sections
+
 That path starts the laptop camera backend on `http://127.0.0.1:8001/`.
+
+Recommended Windows local shutdown from the repo root:
+
+```powershell
+.\stop_local.ps1
+```
+
+That path reads the recorded runtime state or falls back to the listener on the configured port, stops BunnyCam, and appends a timestamped shutdown result to `STARTUP_RESULTS.md`.
 
 Windows convenience launchers are included for local development:
 
@@ -83,14 +101,92 @@ Windows convenience launchers are included for local development:
 ```
 
 ```powershell
+.\stop_local.ps1
+```
+
+```powershell
 .\bin\start_local.ps1
+```
+
+```powershell
+.\bin\stop_local.ps1
 ```
 
 ```bat
 bin\start_local.cmd
 ```
 
+```bat
+bin\stop_local.cmd
+```
+
 Both default to `CAMERA_BACKEND=laptop`, `BUNNYCAM_PORT=8001`, and `BUNNYCAM_HOST=127.0.0.1`, while still allowing any of those environment variables to be overridden.
+
+Useful switches for the PowerShell launcher:
+
+```powershell
+.\start_local.ps1 -SkipInstall
+.\start_local.ps1 -StartupTimeoutSec 90 -PostStartMonitorSec 30
+```
+
+Launcher metadata switches for LLS or operator notes:
+
+```powershell
+.\start_local.ps1 -Actor LLS -Issue "..." -Fix "..." -Note "..."
+.\stop_local.ps1 -Actor LLS -Issue "..." -Fix "..." -Note "..."
+```
+
+When `-Actor LLS` is used, `STARTUP_RESULTS.md` keeps the issue, fix, and note in a separate `LLS Session Notes` section keyed by timestamp and hostname.
+
+Runtime artifacts:
+
+- `STARTUP_RESULTS.md`: tracked markdown history of startup success and failure across devices
+- `logs/bunnycam-runtime.json`: latest managed runtime PID and endpoint details for shutdown
+- `logs/bunnycam-start.stdout.log`: latest process stdout
+- `logs/bunnycam-start.stderr.log`: latest process stderr
+
+Candidate collection artifacts:
+
+- `data/candidates/images/YYYY/MM/DD/`: saved candidate crops
+- `data/candidates/metadata/YYYY/MM/DD/`: per-candidate JSON metadata
+- `data/candidates/review/approved_manifest.json`: training-ready approved index
+- `data/candidates/review/rejected_manifest.json`: rejected index for exclusion
+- `data/exports/reviewed/YYYYMMDD_HHMMSS/`: versioned reviewed export bundles
+- `data/training/detection/YYYYMMDD_HHMMSS/`: versioned detection-training datasets with manifests and YOLO labels
+- `data/training/identity/YYYYMMDD_HHMMSS/`: versioned identity-training datasets with grouped image folders and manifests
+- `faces/known_people/<identity>/encodings.json`: persistent promoted multi-sample person gallery
+- `faces/known_people/<identity>/samples/`: copied approved person crops used for promotion
+- `data/identity_gallery/pets/<identity>/gallery.json`: persistent promoted pet gallery metadata
+- `data/identity_gallery/pets/<identity>/samples/`: copied approved pet crops used for future identity work
+- `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
+- `GET /review`: lightweight review and labeling queue UI
+- `GET /api/version`: app version/build metadata for UI display and diagnostics
+- `GET /api/review/identity-gallery-status`: small promoted-gallery status summary
+- `POST /api/review/promote-identities`: promote approved reviewed samples into active identity galleries
+
+Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
+
+The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
+
+The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
+
+Reviewed export is conservative by design: only `approved` items export. Rejected items are excluded, and labeled-but-not-approved items are not exported. Each export bundle includes copied images, copied source metadata JSON, and a training-ready `manifest.json` under `data/exports/reviewed/...`.
+
+Training dataset packaging is conservative too. Detection packaging only includes approved items with a valid full-frame image, valid normalized bbox, and valid metadata file; it writes versioned YOLO-ready datasets under `data/training/detection/...`. Identity packaging only includes approved labeled items with valid crop and metadata files; it writes grouped image folders under `data/training/identity/...`. Both dataset types use deterministic hash-based train/validation splits, emit inspectable `manifest.json` and `records.jsonl` files, and record validation summaries so skipped items and missing fields are visible.
+
+Local training scaffolding is intentionally external and light. The repo now includes `tools/training_cli.py` and `training/README.md` for packaging, validation, and scaffold generation on a stronger development machine. This phase does not retrain models on the Pi and does not auto-replace the production detector.
+
+Reviewed identity promotion is conservative by design as well:
+
+- only `approved` reviewed items are eligible
+- unlabeled items never promote
+- rejected items never promote
+- people must yield a usable face encoding to promote
+- near-duplicate person encodings are suppressed so galleries stay compact
+- promoted pet galleries are loaded on startup for conservative live cat/dog identity matching
+- live pet identity uses a lightweight local descriptor (color histogram + small grayscale signature)
+- pet naming stays conservative: a strong class-compatible match plus a margin over alternatives is required, otherwise the app falls back to generic `cat` / `dog`
+- matched pet tracks keep their identity briefly through short weak periods, then fall back cleanly after continuity is lost
 
 VS Code workspace helpers are also included:
 
