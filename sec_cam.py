@@ -16,6 +16,7 @@ from candidate_collection import encode_rgb_bmp
 from identity_gallery import ReviewedIdentityPromoter
 from reviewed_export import ReviewedDatasetExporter
 from review_queue import CandidateReviewQueue
+from training_dataset import TrainingDatasetPackager
 from version_info import get_app_version_info
 
 # --------------------
@@ -74,6 +75,7 @@ RECORD_DIR_H264 = os.path.join(BASE_DIR, "recordings")        # temp/raw segment
 RECORD_DIR_MP4 = os.path.join(BASE_DIR, "recordings_mp4")     # browser-playable segments
 CANDIDATE_DATA_DIR = os.path.join(BASE_DIR, "data", "candidates")
 EXPORT_DATA_DIR = os.path.join(BASE_DIR, "data", "exports")
+TRAINING_DATA_DIR = os.path.join(BASE_DIR, "data", "training")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 os.makedirs(RECORD_DIR_H264, exist_ok=True)
 os.makedirs(RECORD_DIR_MP4, exist_ok=True)
@@ -821,6 +823,7 @@ app = Flask(__name__)
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 _review_queue = CandidateReviewQueue(CANDIDATE_DATA_DIR)
 _review_exporter = ReviewedDatasetExporter(CANDIDATE_DATA_DIR, EXPORT_DATA_DIR, review_queue=_review_queue)
+_training_packager = TrainingDatasetPackager(CANDIDATE_DATA_DIR, TRAINING_DATA_DIR, review_queue=_review_queue)
 _identity_promoter = ReviewedIdentityPromoter(
     CANDIDATE_DATA_DIR,
     os.path.join(BASE_DIR, "faces"),
@@ -996,6 +999,19 @@ def _identity_gallery_payload_with_paths(payload: dict) -> dict:
         rendered["status"] = _identity_gallery_payload_with_paths(status_payload)
 
     return rendered
+
+
+def _training_dataset_payload_with_paths(payload: dict) -> dict:
+    def _render(value, key: str | None = None):
+        if isinstance(value, dict):
+            return {nested_key: _render(nested_value, nested_key) for nested_key, nested_value in value.items()}
+        if isinstance(value, list):
+            return [_render(item, key) for item in value]
+        if isinstance(value, str) and key and key.endswith(("_path", "_root")) and os.path.isabs(value):
+            return _to_repo_relative_path(value)
+        return value
+
+    return _render(dict(payload))
 
 
 def _read_ppm_asset(asset_path: str) -> np.ndarray:
@@ -1307,6 +1323,18 @@ def review_export():
         "exported_count": payload["exported_count"],
         "skipped_count": payload["skipped_count"],
     })
+
+
+@app.get("/api/review/training-dataset-status")
+def review_training_dataset_status():
+    payload = _training_packager.get_status()
+    return jsonify({"ok": True, **_training_dataset_payload_with_paths(payload)})
+
+
+@app.post("/api/review/package-training-datasets")
+def review_package_training_datasets():
+    payload = _training_packager.package_training_datasets(version_info=dict(_app_version_info))
+    return jsonify({"ok": True, **_training_dataset_payload_with_paths(payload)})
 
 
 @app.get("/api/review/identity-gallery-status")

@@ -152,6 +152,8 @@ Candidate collection artifacts:
 - `data/candidates/review/approved_manifest.json`: training-ready approved index
 - `data/candidates/review/rejected_manifest.json`: rejected index for exclusion
 - `data/exports/reviewed/YYYYMMDD_HHMMSS/`: versioned reviewed export bundles
+- `data/training/detection/YYYYMMDD_HHMMSS/`: versioned detection-training datasets with manifests and YOLO labels
+- `data/training/identity/YYYYMMDD_HHMMSS/`: versioned identity-training datasets with grouped image folders and manifests
 - `faces/known_people/<identity>/encodings.json`: persistent promoted multi-sample person gallery
 - `faces/known_people/<identity>/samples/`: copied approved person crops used for promotion
 - `data/identity_gallery/pets/<identity>/gallery.json`: persistent promoted pet gallery metadata
@@ -169,6 +171,10 @@ The review queue updates the existing candidate metadata in place with durable `
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
 
 Reviewed export is conservative by design: only `approved` items export. Rejected items are excluded, and labeled-but-not-approved items are not exported. Each export bundle includes copied images, copied source metadata JSON, and a training-ready `manifest.json` under `data/exports/reviewed/...`.
+
+Training dataset packaging is conservative too. Detection packaging only includes approved items with a valid full-frame image, valid normalized bbox, and valid metadata file; it writes versioned YOLO-ready datasets under `data/training/detection/...`. Identity packaging only includes approved labeled items with valid crop and metadata files; it writes grouped image folders under `data/training/identity/...`. Both dataset types use deterministic hash-based train/validation splits, emit inspectable `manifest.json` and `records.jsonl` files, and record validation summaries so skipped items and missing fields are visible.
+
+Local training scaffolding is intentionally external and light. The repo now includes `tools/training_cli.py` and `training/README.md` for packaging, validation, and scaffold generation on a stronger development machine. This phase does not retrain models on the Pi and does not auto-replace the production detector.
 
 Reviewed identity promotion is conservative by design as well:
 
