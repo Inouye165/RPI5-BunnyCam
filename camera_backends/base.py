@@ -44,12 +44,14 @@ class CameraBackend(ABC):
     supports_rotation = True
     controls_module = None
 
-    def __init__(self, stream_output, preview_jpeg_quality: int = 75, preview_size: tuple[int, int] | None = None):
+    def __init__(self, stream_output, preview_jpeg_quality: int = 75, preview_size: tuple[int, int] | None = None,
+                 preview_source: str | None = None):
         self.stream_output = stream_output
         self.rotation = 0
         self._main_size, self._lores_size = sizes_for_rotation(0)
         self.preview_jpeg_quality = int(preview_jpeg_quality)
         self.preview_size = preview_size
+        self.preview_source = (preview_source or "default").strip().lower()
 
     @abstractmethod
     def start(self, rotation_deg: int = 0) -> None:
@@ -104,6 +106,7 @@ class CameraBackend(ABC):
             "preview_w": preview_w,
             "preview_h": preview_h,
             "preview_size_applied": self.preview_size_applied,
+            "preview_source": self.preview_source,
             "rotation": self.rotation,
             "supports_recording": self.supports_recording,
             "supports_rotation": self.supports_rotation,

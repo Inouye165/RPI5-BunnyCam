@@ -536,6 +536,7 @@ def test_preview_settings_default_for_laptop_backend(monkeypatch):
 
     assert module.PREVIEW_SETTINGS["backend"] == "laptop"
     assert module.PREVIEW_SETTINGS["profile"] == "laptop-low-latency"
+    assert module.PREVIEW_SETTINGS["source"] == "capture"
     assert module.PREVIEW_SETTINGS["max_fps"] == 12.0
     assert module.PREVIEW_SETTINGS["jpeg_quality"] == 60
     assert module.PREVIEW_SETTINGS["width"] == 800
@@ -546,11 +547,12 @@ def test_preview_settings_default_for_pi_backend(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="pi")
 
     assert module.PREVIEW_SETTINGS["backend"] == "pi"
-    assert module.PREVIEW_SETTINGS["profile"] == "pi-balanced-low-latency"
-    assert module.PREVIEW_SETTINGS["max_fps"] == 12.0
+    assert module.PREVIEW_SETTINGS["profile"] == "pi-lores-preview"
+    assert module.PREVIEW_SETTINGS["source"] == "lores"
+    assert module.PREVIEW_SETTINGS["max_fps"] == 15.0
     assert module.PREVIEW_SETTINGS["jpeg_quality"] == 60
-    assert module.PREVIEW_SETTINGS["width"] == 960
-    assert module.PREVIEW_SETTINGS["height"] == 540
+    assert module.PREVIEW_SETTINGS["width"] == 640
+    assert module.PREVIEW_SETTINGS["height"] == 360
 
 
 def test_config_route_includes_preview_settings(monkeypatch):
@@ -558,6 +560,7 @@ def test_config_route_includes_preview_settings(monkeypatch):
     monkeypatch.setenv("BUNNYCAM_PREVIEW_JPEG_QUALITY", "68")
     monkeypatch.setenv("BUNNYCAM_PREVIEW_WIDTH", "800")
     monkeypatch.setenv("BUNNYCAM_PREVIEW_HEIGHT", "450")
+    monkeypatch.setenv("BUNNYCAM_PREVIEW_SOURCE", "capture")
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
 
     app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
@@ -569,6 +572,7 @@ def test_config_route_includes_preview_settings(monkeypatch):
     payload = response.get_json()
     assert payload["preview_profile"] == "laptop-low-latency"
     assert payload["preview_backend_profile"] == "laptop"
+    assert payload["preview_source"] == "capture"
     assert payload["preview_max_fps"] == 12.0
     assert payload["preview_jpeg_quality"] == 68
     assert payload["preview_width"] == 800
@@ -581,6 +585,7 @@ def test_config_route_includes_preview_settings(monkeypatch):
         "BUNNYCAM_PREVIEW_JPEG_QUALITY",
         "BUNNYCAM_PREVIEW_WIDTH",
         "BUNNYCAM_PREVIEW_HEIGHT",
+        "BUNNYCAM_PREVIEW_SOURCE",
     ]
 
 

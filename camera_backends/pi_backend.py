@@ -18,6 +18,7 @@ from .base import CameraBackend, normalize_rotation, sizes_for_rotation
 
 logger = logging.getLogger(__name__)
 LORES_PUBLISH_FPS = 15.0
+PI_PREVIEW_SOURCES = {"main", "lores"}
 
 
 def create_picamera(retries: int = 10, retry_delay: float = 1.0):
@@ -53,6 +54,10 @@ class PiCameraBackend(CameraBackend):
 
     def __init__(self, stream_output, **kwargs):
         super().__init__(stream_output=stream_output, **kwargs)
+        if self.preview_source in {"default", ""}:
+            self.preview_source = "lores"
+        if self.preview_source not in PI_PREVIEW_SOURCES:
+            raise ValueError(f"Unsupported Pi preview source '{self.preview_source}'. Expected one of: lores, main.")
         self._picam2 = None
         self._jpeg_encoder = self._create_preview_encoder()
         self._jpeg_output = FileOutput(stream_output)
@@ -74,10 +79,14 @@ class PiCameraBackend(CameraBackend):
 
     @property
     def effective_preview_size(self) -> tuple[int, int]:
+        if self.preview_source == "lores":
+            return self._lores_size
         return self._main_size
 
     @property
     def preview_size_applied(self) -> bool:
+        if self.preview_source == "lores":
+            return self.preview_stream_size is not None and self._lores_size == self.preview_stream_size
         return False
 
     def _ensure_camera(self):
@@ -166,7 +175,11 @@ class PiCameraBackend(CameraBackend):
 
     def start(self, rotation_deg: int = 0) -> None:
         self.rotation = normalize_rotation(rotation_deg)
-        self._main_size, self._lores_size = sizes_for_rotation(self.rotation)
+        self._main_size, default_lores_size = sizes_for_rotation(self.rotation)
+        if self.preview_source == "lores" and self.preview_stream_size is not None:
+            self._lores_size = self.preview_stream_size
+        else:
+            self._lores_size = default_lores_size
 
         picam2 = self._ensure_camera()
         self.stop_recording()
@@ -192,7 +205,7 @@ class PiCameraBackend(CameraBackend):
         picam2.configure(config)
         picam2.start()
         self._apply_autofocus_if_supported()
-        picam2.start_encoder(self._jpeg_encoder, self._jpeg_output, name="main")
+        picam2.start_encoder(self._jpeg_encoder, self._jpeg_output, name=self.preview_source)
         self._start_lores_publisher()
         if not self._lores_frame_ready.wait(timeout=1.0):
             self.stop()

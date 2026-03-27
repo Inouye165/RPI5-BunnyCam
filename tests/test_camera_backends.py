@@ -74,6 +74,7 @@ class _FakePicamera:
         self.capture_count = 0
         self.frames = []
         self.camera_controls = {}
+        self.start_encoder_calls = []
 
     @staticmethod
     def global_camera_info():
@@ -92,6 +93,7 @@ class _FakePicamera:
         return None
 
     def start_encoder(self, *_args, **_kwargs):
+        self.start_encoder_calls.append((_args, _kwargs))
         return None
 
     def stop_encoder(self, *_args, **_kwargs):
@@ -183,12 +185,33 @@ def test_pi_backend_preview_encoder_falls_back_when_quality_override_unsupported
     assert calls == [((), {"q": 70}), ((), {})]
 
 
-def test_pi_backend_reports_main_stream_as_effective_preview_size(monkeypatch):
+def test_pi_backend_reports_lores_stream_as_effective_preview_size_after_start(monkeypatch):
     module = _import_pi_backend(monkeypatch, _FakePicamera)
 
     backend = module.PiCameraBackend(stream_output=object(), preview_size=(640, 360))
+    fake_camera = _FakePicamera()
+    fake_camera.frames = [np.zeros((360, 640, 3), dtype=np.uint8)]
+    backend._picam2 = fake_camera
+    backend.start(rotation_deg=0)
     metadata = backend.get_metadata()
 
-    assert metadata["preview_w"] == 1280
-    assert metadata["preview_h"] == 720
-    assert metadata["preview_size_applied"] is False
+    assert metadata["preview_w"] == 640
+    assert metadata["preview_h"] == 360
+    assert metadata["preview_source"] == "lores"
+    assert metadata["preview_size_applied"] is True
+    backend.stop()
+
+
+def test_pi_backend_uses_lores_stream_for_preview_and_main_for_recording(monkeypatch):
+    module = _import_pi_backend(monkeypatch, _FakePicamera)
+    backend = module.PiCameraBackend(stream_output=object(), preview_size=(640, 360), preview_source="lores")
+    fake_camera = _FakePicamera()
+    fake_camera.frames = [np.zeros((360, 640, 3), dtype=np.uint8)]
+    backend._picam2 = fake_camera
+
+    backend.start(rotation_deg=0)
+    backend.start_recording("segment.h264", bitrate=2_500_000)
+
+    assert fake_camera.start_encoder_calls[0][1]["name"] == "lores"
+    assert fake_camera.start_encoder_calls[1][1]["name"] == "main"
+    backend.stop()
