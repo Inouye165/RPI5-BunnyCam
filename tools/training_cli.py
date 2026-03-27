@@ -14,6 +14,7 @@ if BASE_DIR not in sys.path:
 from review_queue import CandidateReviewQueue
 from training_dataset import TrainingDatasetPackager
 from version_info import get_app_version_info
+from detector_training import DetectorTrainingManager
 
 
 def _build_packager() -> TrainingDatasetPackager:
@@ -21,6 +22,10 @@ def _build_packager() -> TrainingDatasetPackager:
     training_root = os.path.join(BASE_DIR, "data", "training")
     queue = CandidateReviewQueue(candidate_root)
     return TrainingDatasetPackager(candidate_root, training_root, review_queue=queue)
+
+
+def _build_detector_manager() -> DetectorTrainingManager:
+    return DetectorTrainingManager(BASE_DIR)
 
 
 def _latest_dataset_path(packager: TrainingDatasetPackager, dataset_type: str) -> str:
@@ -67,10 +72,29 @@ def main() -> int:
     scaffold_identity_parser.add_argument("--output-root", default=None)
     scaffold_identity_parser.add_argument("--stamp", default=None)
 
+    train_detector_parser = subparsers.add_parser("train-detector", help="Execute a real detector training run")
+    train_detector_parser.add_argument("--dataset", default=None, help="Path to detection dataset (uses latest if not specified)")
+    train_detector_parser.add_argument("--profile", default="standard", choices=["quick", "standard", "high-quality"], help="Training profile")
+    train_detector_parser.add_argument("--output-root", default=None, help="Output root for model artifacts")
+    train_detector_parser.add_argument("--stamp", default=None, help="Run timestamp stamp")
+    train_detector_parser.add_argument("--device", default=None, help="Device override (e.g., 'cpu', '0', 'cuda')")
+
+    detector_profiles_parser = subparsers.add_parser("detector-profiles", help="List available detector training profiles")
+
+    detector_runs_parser = subparsers.add_parser("detector-runs", help="List detector training runs")
+    detector_runs_parser.add_argument("--limit", type=int, default=None, help="Limit number of runs shown")
+
+    detector_status_parser = subparsers.add_parser("detector-status", help="Show status of a detector training run")
+    detector_status_parser.add_argument("run_ref", nargs="?", default="latest", help="Run reference (timestamp, 'latest')")
+
+    detector_best_parser = subparsers.add_parser("detector-best", help="Get the best checkpoint path from a run")
+    detector_best_parser.add_argument("run_ref", nargs="?", default="latest", help="Run reference (timestamp, 'latest')")
+
     subparsers.add_parser("status", help="Show the latest packaged dataset status")
 
     args = parser.parse_args()
     packager = _build_packager()
+    detector_manager = _build_detector_manager()
 
     if args.command == "package":
         payload = packager.package_training_datasets(
@@ -114,6 +138,37 @@ def main() -> int:
     if args.command == "scaffold-identity-run":
         dataset_path = args.dataset or _latest_dataset_path(packager, "identity")
         _print(packager.scaffold_identity_training(dataset_path, stamp=args.stamp, model_root=args.output_root))
+        return 0
+
+    if args.command == "train-detector":
+        dataset_path = args.dataset or detector_manager.get_latest_dataset_path()
+        payload = detector_manager.train(
+            dataset_path,
+            profile_name=args.profile,
+            stamp=args.stamp,
+            output_root=args.output_root,
+            device_override=args.device,
+        )
+        _print(payload)
+        return 0
+
+    if args.command == "detector-profiles":
+        _print(detector_manager.get_profiles())
+        return 0
+
+    if args.command == "detector-runs":
+        payload = detector_manager.list_runs(limit=args.limit)
+        _print(payload)
+        return 0
+
+    if args.command == "detector-status":
+        payload = detector_manager.get_run_status(args.run_ref)
+        _print(payload)
+        return 0
+
+    if args.command == "detector-best":
+        payload = detector_manager.get_best_checkpoint(args.run_ref)
+        _print(payload)
         return 0
 
     return 1

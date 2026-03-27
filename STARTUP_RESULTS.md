@@ -143,6 +143,20 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: Endpoint already healthy; no new process started.
 - Managed Components: BunnyCam Python web process
 - Details: Endpoint already healthy; no new process started.
+### 2026-03-26 19:40:32 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-26 19:40:32
+- Hostname: Rons-Computer
+- Actor: LLS
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 29576
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
 <!-- STARTUP_RUN_HISTORY_END -->
 
 ## LLS Session Notes
@@ -187,7 +201,19 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Issue: Shutdown safety review found that a stale runtime-state PID could be trusted without re-validating the owning process.
 - Fix: Hardened stop_local.ps1 to verify the runtime-state PID still belongs to sec_cam.py, fall back to the port listener when needed, and remove stale runtime state when no BunnyCam process remains.
 - Note: Post-hardening validation passed via pytest and the app remained healthy on http://127.0.0.1:8001/.
+### 2026-03-26 19:40:32 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-26 19:40:32
+- Hostname: Rons-Computer
+- Actor: LLS
+- Issue: Requested startup validation from STARTUP_RESULTS.md.
+- Fix: Executed the script-managed startup path so the run history and LLS notes are recorded in the standard format.
+- Note: Starting BunnyCam and verifying the endpoint status for this session.
 <!-- STARTUP_LLS_NOTES_END -->
+
+
+
+
 
 
 
