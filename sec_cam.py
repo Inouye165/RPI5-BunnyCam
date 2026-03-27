@@ -198,22 +198,14 @@ class StreamingOutput(io.BufferedIOBase):
         self.frame = None
         self.condition = Condition()
         self.max_fps = float(max_fps) if max_fps else None
-        self._last_publish_monotonic = 0.0
 
     def set_max_fps(self, max_fps: float | None):
         with self.condition:
             self.max_fps = float(max_fps) if max_fps else None
-            self._last_publish_monotonic = 0.0
 
     def write(self, buf):
-        now = time.monotonic()
         with self.condition:
             self.frame = bytes(buf)
-            if self.max_fps and self.frame is not None:
-                min_interval = 1.0 / self.max_fps
-                if (now - self._last_publish_monotonic) < min_interval:
-                    return len(buf)
-            self._last_publish_monotonic = now
             self.condition.notify_all()
         return len(buf)
 
@@ -978,7 +970,7 @@ def favicon_ico():
 def gen_frames():
     while not shutdown_evt.is_set():
         with stream_output.condition:
-            stream_output.condition.wait(timeout=1.0)
+            stream_output.condition.wait(timeout=0.1)
             frame = stream_output.frame
         if not frame:
             continue

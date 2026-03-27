@@ -46,6 +46,7 @@ class LaptopCameraBackend(CameraBackend):
 
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._main_size[0])
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._main_size[1])
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
 
     def _rotate_bgr(self, frame_bgr):

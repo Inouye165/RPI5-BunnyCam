@@ -589,10 +589,8 @@ def test_config_route_includes_preview_settings(monkeypatch):
     ]
 
 
-def test_streaming_output_drops_frames_inside_preview_budget(monkeypatch):
+def test_streaming_output_always_publishes_frames(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
-    times = iter([0.0, 0.03, 0.18])
-    monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
     output = module.StreamingOutput(max_fps=10.0)
 
     output.write(b"frame-1")
