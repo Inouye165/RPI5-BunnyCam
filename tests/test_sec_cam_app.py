@@ -537,7 +537,7 @@ def test_preview_settings_default_for_laptop_backend(monkeypatch):
     assert module.PREVIEW_SETTINGS["backend"] == "laptop"
     assert module.PREVIEW_SETTINGS["profile"] == "laptop-low-latency"
     assert module.PREVIEW_SETTINGS["source"] == "capture"
-    assert module.PREVIEW_SETTINGS["max_fps"] == 12.0
+    assert module.PREVIEW_SETTINGS["max_fps"] == 24.0
     assert module.PREVIEW_SETTINGS["jpeg_quality"] == 60
     assert module.PREVIEW_SETTINGS["width"] == 800
     assert module.PREVIEW_SETTINGS["height"] == 450

@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import glob
+import sys
 import time
 import signal
 import subprocess
@@ -77,7 +78,7 @@ from camera_backends.base import BackendUnavailableError
 PREVIEW_PROFILES = {
     "laptop": {
         "profile": "laptop-low-latency",
-        "max_fps": 12.0,
+        "max_fps": 24.0,
         "jpeg_quality": 60,
         "size": (800, 450),
         "source": "capture",
@@ -747,6 +748,13 @@ def prune_mp4():
 
 def convert_worker():
     # Converts finished .h264 -> .mp4 (for browser playback)
+    # Run ffmpeg at below-normal priority so it doesn't steal CPU from
+    # streaming and detection on constrained hardware (Pi 5, laptop, etc.).
+    _ffmpeg_popen_extra: dict = {}
+    if sys.platform == 'win32':
+        _ffmpeg_popen_extra['creationflags'] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
+    else:
+        _ffmpeg_popen_extra['preexec_fn'] = lambda: os.nice(10)
     while not shutdown_evt.is_set():
         try:
             item = convert_q.get(timeout=0.5)
@@ -774,7 +782,7 @@ def convert_worker():
                 "-movflags", "+faststart",
                 mp4_path
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, **_ffmpeg_popen_extra)
             ok = True
         except (OSError, subprocess.SubprocessError):
             ok = False
@@ -791,7 +799,7 @@ def convert_worker():
                     "-movflags", "+faststart",
                     mp4_path
                 ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, **_ffmpeg_popen_extra)
                 ok = True
             except (OSError, subprocess.SubprocessError):
                 ok = False
@@ -1374,6 +1382,37 @@ def detections_get():
         "reason": detection_status["detection_reason"],
         "face_recognition_enabled": detection_status["face_recognition_enabled"],
     })
+
+
+@app.get("/api/live-state")
+def live_state():
+    """Combined status + detections endpoint — one request instead of two."""
+    detection_status = _detection_status_payload()
+
+    with state_lock:
+        status_payload = dict(motion_state)
+    status_payload["backend"] = _selected_backend_name()
+    status_payload["runtime_initialized"] = runtime_state["runtime_initialized"]
+    status_payload["app_version"] = dict(_app_version_info)
+    status_payload.update(detection_status)
+
+    if _detect is None:
+        det_payload = {
+            "detections": [],
+            "total": 0,
+            "model": detection_status["detection_model"],
+            "enabled": False,
+            "reason": detection_status["detection_reason"],
+        }
+    else:
+        det_payload = {
+            **_detect.get_detections(),
+            "enabled": detection_status["detection_enabled"],
+            "reason": detection_status["detection_reason"],
+            "face_recognition_enabled": detection_status["face_recognition_enabled"],
+        }
+
+    return jsonify({"status": status_payload, "detect": det_payload})
 
 
 @app.get("/candidate-collection/status")

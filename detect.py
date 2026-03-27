@@ -28,6 +28,7 @@ Notes
 import io
 import json
 import os
+import sys
 import time
 import threading
 import logging
@@ -559,6 +560,14 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
 # ── background worker ─────────────────────────────────────────────────────────
 
 def _worker(get_frame_fn: Callable) -> None:
+    # Lower this thread's priority so inference doesn't compete with
+    # streaming and motion detection on constrained hardware.
+    try:
+        if sys.platform != 'win32':
+            os.nice(5)
+    except OSError:
+        pass
+
     # Load models inside the thread so Flask starts immediately (model download
     # happens in the background; detections appear once loading is done).
     _load_yolo()
