@@ -346,6 +346,7 @@ let lastBuzzMs = 0;
 const BUZZ_COOLDOWN_MS = 900;
 
 let roiNorm = null;
+let focusTargetNorm = null;
 
 const tabLive = document.getElementById('tabLive');
 const tabPlay = document.getElementById('tabPlay');
@@ -614,6 +615,7 @@ function setFocusStatus(text, state) {
 }
 
 function drawFocusTarget(norm) {
+  focusTargetNorm = norm || null;
     if (!norm) {
         focusBox.style.display = 'none';
         return;
@@ -979,12 +981,31 @@ const nameSelectedBtn = document.getElementById('nameSelectedBtn');
 const clearSelBtn = document.getElementById('clearSelBtn');
 let focusSupported = false;  // set from loadConfig
 
-function drawDetections(dets) {
-  const w = detectCanvas.offsetWidth;
-  const h = detectCanvas.offsetHeight;
-  if (!w || !h) return;
-  detectCanvas.width  = w;
+function syncDetectCanvasSize(force = false) {
+  const w = Math.round(detectCanvas.offsetWidth);
+  const h = Math.round(detectCanvas.offsetHeight);
+  if (!w || !h) return false;
+  if (!force && detectCanvas.width === w && detectCanvas.height === h) {
+    return false;
+  }
+  detectCanvas.width = w;
   detectCanvas.height = h;
+  return true;
+}
+
+function refreshLiveOverlayLayout(force = false) {
+  const resized = syncDetectCanvasSize(force);
+  drawRoi(roiNorm);
+  drawFocusTarget(focusTargetNorm);
+  if (resized || force) {
+    drawDetections(lastDetections);
+  }
+}
+
+function drawDetections(dets) {
+  if (!syncDetectCanvasSize()) return;
+  const w = detectCanvas.width;
+  const h = detectCanvas.height;
   detectCtx.clearRect(0, 0, w, h);
   detectCtx.font = 'bold 13px sans-serif';
   for (let i = 0; i < dets.length; i++) {
@@ -1193,6 +1214,13 @@ async function pollDetections({ signal } = {}) {
     detectSeen.textContent = 'nothing detected';
     detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
   }
+}
+
+window.addEventListener('resize', () => refreshLiveOverlayLayout(true));
+cam.addEventListener('load', () => refreshLiveOverlayLayout(true));
+if (window.ResizeObserver) {
+  const overlayResizeObserver = new ResizeObserver(() => refreshLiveOverlayLayout(true));
+  overlayResizeObserver.observe(wrap);
 }
 
 async function enrollFace(evt) {

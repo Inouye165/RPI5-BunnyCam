@@ -518,6 +518,41 @@ def test_config_when_detect_module_unavailable(monkeypatch):
     assert payload["detection_reason"] == "detect module unavailable"
 
 
+def test_config_route_includes_preview_settings(monkeypatch):
+    monkeypatch.setenv("BUNNYCAM_PREVIEW_MAX_FPS", "12")
+    monkeypatch.setenv("BUNNYCAM_PREVIEW_JPEG_QUALITY", "68")
+    monkeypatch.setenv("BUNNYCAM_PREVIEW_WIDTH", "800")
+    monkeypatch.setenv("BUNNYCAM_PREVIEW_HEIGHT", "450")
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["preview_max_fps"] == 12.0
+    assert payload["preview_jpeg_quality"] == 68
+    assert payload["preview_width"] == 800
+    assert payload["preview_height"] == 450
+
+
+def test_streaming_output_drops_frames_inside_preview_budget(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    times = iter([0.0, 0.03, 0.18])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(times))
+    output = module.StreamingOutput(max_fps=10.0)
+
+    output.write(b"frame-1")
+    assert output.frame == b"frame-1"
+    output.write(b"frame-2")
+    assert output.frame == b"frame-1"
+    output.write(b"frame-3")
+
+    assert output.frame == b"frame-3"
+
+
 def test_server_port_uses_env_override(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
     monkeypatch.setenv("BUNNYCAM_PORT", "8001")

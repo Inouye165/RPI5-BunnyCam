@@ -51,10 +51,10 @@ class PiCameraBackend(CameraBackend):
     supports_rotation = Transform is not None
     controls_module = controls
 
-    def __init__(self, stream_output):
-        super().__init__(stream_output=stream_output)
+    def __init__(self, stream_output, **kwargs):
+        super().__init__(stream_output=stream_output, **kwargs)
         self._picam2 = None
-        self._jpeg_encoder = JpegEncoder()
+        self._jpeg_encoder = self._create_preview_encoder()
         self._jpeg_output = FileOutput(stream_output)
         self._h264_encoder = None
         self._h264_output = None
@@ -64,6 +64,13 @@ class PiCameraBackend(CameraBackend):
         self._lores_frame_ready = threading.Event()
         self._lores_thread = None
         self._latest_lores = None
+
+    def _create_preview_encoder(self):
+        try:
+            return JpegEncoder(q=self.preview_jpeg_quality)
+        except TypeError:
+            logger.debug("JpegEncoder does not accept quality override; using defaults.")
+            return JpegEncoder()
 
     def _ensure_camera(self):
         if self._picam2 is None:

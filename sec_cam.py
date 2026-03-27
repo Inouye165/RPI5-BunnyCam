@@ -44,6 +44,39 @@ def _load_local_env(filename: str = ".env.local"):
 
 _load_local_env()
 
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw_value = os.getenv(name)
+    try:
+        value = float(raw_value) if raw_value is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+PREVIEW_MAX_FPS = _env_float("BUNNYCAM_PREVIEW_MAX_FPS", 15.0, minimum=1.0, maximum=30.0)
+PREVIEW_JPEG_QUALITY = _env_int("BUNNYCAM_PREVIEW_JPEG_QUALITY", 75, minimum=40, maximum=95)
+PREVIEW_WIDTH = _env_int("BUNNYCAM_PREVIEW_WIDTH", 960, minimum=320, maximum=1920)
+PREVIEW_HEIGHT = _env_int("BUNNYCAM_PREVIEW_HEIGHT", 540, minimum=180, maximum=1080)
+PREVIEW_SIZE = (PREVIEW_WIDTH, PREVIEW_HEIGHT)
+
 from camera_backends import create_camera_backend, normalize_camera_backend_name
 from camera_backends.base import BackendUnavailableError
 
@@ -116,18 +149,31 @@ cfg = {
 # MJPEG streaming output
 # --------------------
 class StreamingOutput(io.BufferedIOBase):
-    def __init__(self):
+    def __init__(self, max_fps: float | None = None):
         self.frame = None
         self.condition = Condition()
+        self.max_fps = float(max_fps) if max_fps else None
+        self._last_publish_monotonic = 0.0
+
+    def set_max_fps(self, max_fps: float | None):
+        with self.condition:
+            self.max_fps = float(max_fps) if max_fps else None
+            self._last_publish_monotonic = 0.0
 
     def write(self, buf):
+        now = time.monotonic()
         with self.condition:
+            if self.max_fps and self.frame is not None:
+                min_interval = 1.0 / self.max_fps
+                if (now - self._last_publish_monotonic) < min_interval:
+                    return len(buf)
             self.frame = bytes(buf)
+            self._last_publish_monotonic = now
             self.condition.notify_all()
         return len(buf)
 
 
-stream_output = StreamingOutput()
+stream_output = StreamingOutput(max_fps=PREVIEW_MAX_FPS)
 
 
 # --------------------
@@ -190,7 +236,11 @@ def _update_caminfo(main_size, lores_size):
 
 
 def _configure_camera_backend(backend=None):
-    runtime_state["camera_backend"] = backend if backend is not None else create_camera_backend(stream_output=stream_output)
+    runtime_state["camera_backend"] = backend if backend is not None else create_camera_backend(
+        stream_output=stream_output,
+        preview_jpeg_quality=PREVIEW_JPEG_QUALITY,
+        preview_size=PREVIEW_SIZE,
+    )
     runtime_state["camera_backend_error"] = None
     return runtime_state["camera_backend"]
 
@@ -887,7 +937,11 @@ def gen_frames():
 
 @app.get("/stream.mjpg")
 def stream():
-    return Response(gen_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response = Response(gen_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.get("/status")
@@ -1063,6 +1117,10 @@ def _camera_config_payload():
         "record_enabled": cfg["record_enabled"],
         "record_segment_sec": cfg["record_segment_sec"],
         "record_keep_segments": cfg["record_keep_segments"],
+        "preview_max_fps": PREVIEW_MAX_FPS,
+        "preview_jpeg_quality": PREVIEW_JPEG_QUALITY,
+        "preview_width": PREVIEW_SIZE[0],
+        "preview_height": PREVIEW_SIZE[1],
         "transform_supported": False,
         "record_supported": False,
         "focus_supported": False,
