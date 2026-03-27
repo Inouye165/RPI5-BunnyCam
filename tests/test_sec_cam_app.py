@@ -303,6 +303,19 @@ def test_main_page_renders_version_badge(monkeypatch):
     assert b"v0.3.0 (main@abc1234)" in response.data
 
 
+def test_main_page_includes_live_enroll_selection_persistence_guards(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"const enrollModalState = {" in response.data
+    assert b"!enrollModalState.open" in response.data
+    assert b"detectCtx.setLineDash([8, 6]);" in response.data
+
+
 def test_review_candidates_list_route(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
     monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
@@ -924,6 +937,24 @@ def test_identity_enroll_person_uses_box_center_crop(monkeypatch):
     assert len(captured_calls) == 1
     assert captured_calls[0]["name"] == "Alice"
     assert captured_calls[0]["box"] == box
+
+
+def test_identity_enroll_person_returns_400_when_snapshot_enroll_fails(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_detect", _make_identity_detect_ns(
+        snapshot_enroll=lambda _name, _box: (False, "no face detected in selected area — try when the face is clearly visible"),
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/identity/enroll", json={
+        "name": "Ron", "category": "person", "box": [0.1, 0.2, 0.5, 0.8],
+    })
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "no face detected in selected area" in payload["error"]
 
 
 def test_detections_route_returns_detection_boxes_for_hit_testing(monkeypatch):
