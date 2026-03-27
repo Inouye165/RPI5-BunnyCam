@@ -387,6 +387,77 @@ def test_review_export_route(monkeypatch):
     assert payload["manifest_path"].endswith("manifest.json")
 
 
+def test_review_training_dataset_status_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
+        get_status=lambda: {
+            "generated_at": "2026-03-26T07:20:00Z",
+            "package_name": "20260326_072000",
+            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "detection": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000/manifest.json",
+                "item_count": 2,
+                "class_counts": {"dog": 1, "person": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+            "identity": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000/manifest.json",
+                "item_count": 1,
+                "identity_counts": {"Ron": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/training-dataset-status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["package_name"] == "20260326_072000"
+    assert payload["detection"]["dataset_path"].startswith("data/training/detection/")
+    assert payload["identity"]["identity_counts"] == {"Ron": 1}
+
+
+def test_review_package_training_datasets_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
+        package_training_datasets=lambda **_kwargs: {
+            "generated_at": "2026-03-26T07:21:00Z",
+            "package_name": "20260326_072100",
+            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "detection": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100/manifest.json",
+                "item_count": 4,
+                "class_counts": {"dog": 2, "person": 2},
+                "validation": {"error_count": 0, "errors": []},
+            },
+            "identity": {
+                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100",
+                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100/manifest.json",
+                "item_count": 3,
+                "identity_counts": {"Dobby": 2, "Ron": 1},
+                "validation": {"error_count": 0, "errors": []},
+            },
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/package-training-datasets")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["detection"]["item_count"] == 4
+    assert payload["identity"]["dataset_path"].startswith("data/training/identity/")
+
+
 def test_detections_when_detect_module_unavailable(monkeypatch):
     """Badge should show OFF with reason when _detect is None."""
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
