@@ -38,6 +38,90 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Run History
 <!-- STARTUP_RUN_HISTORY_BEGIN -->
+### 2026-03-27 21:52:36 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 21:52:36
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 35376
+- Summary: Endpoint already healthy; no new process started.
+- Managed Components: BunnyCam Python web process
+- Details: Endpoint already healthy; no new process started.
+### 2026-03-27 21:51:00 | Rons-Computer | start | failure
+
+- Timestamp: 2026-03-27 21:51:00
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 17892
+- Summary: BunnyCam process stayed alive but /status stopped responding during the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: The request was canceled due to the configured HttpClient.Timeout of 3 seconds elapsing.
+### 2026-03-27 21:50:39 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-27 21:50:39
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 32572
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 32572 and removed runtime state.
+### 2026-03-27 21:44:28 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 21:44:28
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 32572
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-27 21:43:24 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-27 21:43:24
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 13664
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 13664 and removed runtime state.
+### 2026-03-27 20:45:14 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-27 20:45:14
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 13664
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
 ### 2026-03-27 12:56:05 | Rons-Computer | start | success
 
 - Timestamp: 2026-03-27 12:56:05
@@ -458,6 +542,24 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: BunnyCam started successfully on Pi backend and processed candidate captures.
 - Managed Components: BunnyCam Python web process
 - Details: /status endpoint should report runtime_initialized=True and backend=pi.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

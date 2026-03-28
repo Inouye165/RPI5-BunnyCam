@@ -44,6 +44,39 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(__file__)
 
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw_value = os.getenv(name)
+    try:
+        value = float(raw_value) if raw_value is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return bool(default)
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
 # ── tunables ──────────────────────────────────────────────────────────────────
 DETECT_FPS   = 2.0   # detections per second
 DETECT_CONF  = 0.40  # YOLO minimum confidence
@@ -56,12 +89,25 @@ TRACK_IOU_MIN        = 0.25
 # Fallback centre-distance threshold (normalised 0–1) when IoU is too low.
 # 0.20 allows ~20 % of the frame width/height of movement between frames.
 TRACK_CDIST_MAX      = 0.20
+# Cross-class matching is stricter so a transient misread can still stick to the
+# same track without making different nearby objects collapse together.
+TRACK_CROSS_CLASS_IOU_MIN = _env_float("BUNNYCAM_CROSS_CLASS_IOU_MIN", 0.45, minimum=0.0, maximum=1.0)
+TRACK_CROSS_CLASS_CDIST_MAX = _env_float("BUNNYCAM_CROSS_CLASS_CDIST_MAX", 0.14, minimum=0.0, maximum=1.0)
 # Frames without a match before a track is discarded.  At 2 fps this is ~4 s.
 TRACK_MAX_MISS       = 8
 # A new face-recognition result must beat the track's best recorded distance by
 # at least this margin before we overwrite an existing confirmed identity.
 # 0.08 prevents name-flipping on small frame-to-frame distance fluctuations.
 TRACK_RELABEL_MARGIN = 0.08
+
+# Lightweight class smoothing / display controls.
+CLASS_HISTORY_SIZE = _env_int("BUNNYCAM_CLASS_HISTORY", 4, minimum=2, maximum=8)
+CLASS_SWITCH_CONFIRM_FRAMES = _env_int("BUNNYCAM_CLASS_SWITCH_CONFIRM_FRAMES", 2, minimum=1, maximum=5)
+CLASS_UNKNOWN_MIN_CONF = _env_float("BUNNYCAM_CLASS_UNKNOWN_MIN_CONF", 0.55, minimum=0.0, maximum=1.0)
+CLASS_DOMINANCE_RATIO = _env_float("BUNNYCAM_CLASS_DOMINANCE_RATIO", 0.62, minimum=0.5, maximum=0.95)
+CLASS_PERSON_FACE_BOOST = _env_float("BUNNYCAM_PERSON_FACE_BOOST", 2.0, minimum=0.0, maximum=10.0)
+CLASS_DOG_OVERRIDE_MARGIN = _env_float("BUNNYCAM_DOG_OVERRIDE_MARGIN", 0.40, minimum=0.0, maximum=5.0)
+DEBUG_CLASS_LABELS = _env_bool("BUNNYCAM_DETECT_DEBUG", False)
 PET_MATCH_MIN_TRACK_HITS = 3
 PET_MATCH_GRACE_FRAMES = 3
 PET_MATCH_SWITCH_MARGIN = 0.08
@@ -142,6 +188,8 @@ class _DetectionTracker:
     low-cost per-track gating without adding a second tracker.
     """
 
+    _class_labels = {"person", "cat", "dog"}
+
     def __init__(self) -> None:
         self._next_id: int = 1
         # Each track is a plain dict with keys:
@@ -151,123 +199,173 @@ class _DetectionTracker:
         self._tracks: list[dict] = []
 
     # ------------------------------------------------------------------
-    def update(self, detections: list[dict]) -> None:
-        """Match *detections* to existing tracks; mutate each in-place.
-
-        After this call every det will have:
-        - ``track_id``  – stable integer ID
-        - ``track_hits`` – number of matched frames seen for that track
-        - ``label``     – sticky identity label for people; current label for pets
-        The internal ``_face_dist`` key is consumed here and removed."""
-
-        now = time.time()
-        matched_track_ids: set[int] = set()
-        matched_det_idxs:  set[int] = set()
-
-        # ── greedy IoU matching ───────────────────────────────────────────
-        for det_i, det in enumerate(detections):
-            det_class = det.get("class", "")
-            best_iou    = 0.0
-            best_track  = None
-            for track in self._tracks:
-                if track["track_id"] in matched_track_ids:
-                    continue
-                if track["class"] != det_class:
-                    continue
-                iou = _iou(det["box"], track["box"])
-                if iou > best_iou:
-                    best_iou   = iou
-                    best_track = track
-
-            if best_track is not None and best_iou >= TRACK_IOU_MIN:
-                self._merge(det, best_track, now)
-                matched_track_ids.add(best_track["track_id"])
-                matched_det_idxs.add(det_i)
-                continue
-
-            # ── centre-distance fallback ──────────────────────────────────
-            best_cdist   = float("inf")
-            best_cd_track = None
-            for track in self._tracks:
-                if track["track_id"] in matched_track_ids:
-                    continue
-                if track["class"] != det_class:
-                    continue
-                cd = _centre_dist(det["box"], track["box"])
-                if cd < best_cdist:
-                    best_cdist    = cd
-                    best_cd_track = track
-
-            if best_cd_track is not None and best_cdist <= TRACK_CDIST_MAX:
-                self._merge(det, best_cd_track, now)
-                matched_track_ids.add(best_cd_track["track_id"])
-                matched_det_idxs.add(det_i)
-                continue
-
-            # ── new track ─────────────────────────────────────────────────
-            raw_label  = det.get("label", det_class or "object")
-            raw_dist   = det.pop("_face_dist", 1.0)
-            det.pop("_pet_match", None)
-            det.pop("_pet_matcher_active", None)
-            new_track  = {
-                "track_id":     self._next_id,
-                "class":        det_class,
-                "box":          det["box"][:],
-                "label":        raw_label,
-                "label_source": (
-                    "face"
-                    if det_class == "person" and raw_label != "person"
-                    else "manual" if det_class in {"cat", "dog"} and raw_label != det_class else "default"
-                ),
-                "best_dist":    raw_dist if det_class == "person" and raw_label != "person" else 1.0,
-                "miss_count":   0,
-                "last_seen":    now,
-                "track_hits":   1,
-                "pet_grace_remaining": 0,
-                "pet_identity_score": 0.0,
-            }
-            self._next_id += 1
-            self._tracks.append(new_track)
-            det["track_id"] = new_track["track_id"]
-            det["track_hits"] = new_track["track_hits"]
-            det["label"] = new_track["label"]
-            matched_det_idxs.add(det_i)
-
-        # ── age unmatched tracks ──────────────────────────────────────────
-        for track in self._tracks:
-            if track["track_id"] not in matched_track_ids:
-                track["miss_count"] += 1
-
-        # ── prune expired tracks ──────────────────────────────────────────
-        self._tracks = [t for t in self._tracks if t["miss_count"] <= TRACK_MAX_MISS]
-
-    # ------------------------------------------------------------------
-    def _merge(self, det: dict, track: dict, now: float) -> None:
-        """Update *track* position + label from a matched *det*."""
-        track["box"]        = det["box"][:]
-        track["miss_count"] = 0
-        track["last_seen"]  = now
-        track["track_hits"] += 1
+    def _track_match_score(self, det: dict, track: dict) -> tuple[float, str] | None:
+        """Return a match score for *det* against *track* or ``None``."""
 
         det_class = det.get("class", "")
-        new_label = det.get("label", det_class or "object")
-        new_dist  = det.pop("_face_dist", 1.0)
+        same_class = track.get("class") == det_class
+        iou = _iou(det["box"], track["box"])
+        cdist = _centre_dist(det["box"], track["box"])
+
+        if same_class:
+            if iou >= TRACK_IOU_MIN:
+                return 2.0 + iou, "iou"
+            if cdist <= TRACK_CDIST_MAX:
+                return 1.5 + (TRACK_CDIST_MAX - cdist), "cdist"
+            return None
+
+        recent_person = int(track.get("person_evidence_frames", 0) or 0) > 0 or track.get("display_class") == "person"
+        if iou >= TRACK_CROSS_CLASS_IOU_MIN:
+            score = 1.0 + iou
+            if recent_person and det_class == "dog":
+                score += 0.15
+            return score, "cross_iou"
+        if cdist <= TRACK_CROSS_CLASS_CDIST_MAX:
+            score = 0.8 + (TRACK_CROSS_CLASS_CDIST_MAX - cdist)
+            if recent_person and det_class == "dog":
+                score += 0.15
+            return score, "cross_cdist"
+        return None
+
+    # ------------------------------------------------------------------
+    def _append_class_history(self, track: dict, det_class: str, conf: float, face_visible: bool) -> None:
+        history = list(track.get("class_history", []))
+        history.append({
+            "class": det_class,
+            "conf": float(conf),
+            "face_visible": bool(face_visible),
+        })
+        if len(history) > CLASS_HISTORY_SIZE:
+            del history[:-CLASS_HISTORY_SIZE]
+        track["class_history"] = history
+
+        person_evidence = int(track.get("person_evidence_frames", 0) or 0)
+        if det_class == "person" or face_visible:
+            track["person_evidence_frames"] = min(CLASS_HISTORY_SIZE, person_evidence + 1)
+        else:
+            track["person_evidence_frames"] = max(0, person_evidence - 1)
+
+    # ------------------------------------------------------------------
+    def _resolve_display_class(self, track: dict) -> tuple[str, str]:
+        history = list(track.get("class_history", []))
+        if not history:
+            return "unknown", "no_history"
+
+        latest = history[-1]
+        latest_class = str(latest.get("class") or "unknown")
+        recent_window = history[-CLASS_HISTORY_SIZE:]
+
+        scores = {"person": 0.0, "cat": 0.0, "dog": 0.0}
+        for entry in recent_window:
+            entry_class = str(entry.get("class") or "unknown")
+            entry_conf = float(entry.get("conf") or 0.0)
+            if entry_class in scores:
+                scores[entry_class] += entry_conf
+            if entry.get("face_visible"):
+                scores["person"] += CLASS_PERSON_FACE_BOOST
+
+        total_score = sum(scores.values())
+        top_class = max(scores, key=scores.get)
+        top_score = scores[top_class]
+
+        latest_run = 1
+        for entry in reversed(recent_window[:-1]):
+            if str(entry.get("class") or "unknown") == latest_class:
+                latest_run += 1
+            else:
+                break
+
+        recent_person_evidence = any(
+            entry.get("face_visible") or str(entry.get("class") or "unknown") == "person"
+            for entry in recent_window[-CLASS_SWITCH_CONFIRM_FRAMES:]
+        )
+
+        if latest_class == "person":
+            return "person", "raw_person"
+
+        if latest.get("face_visible") or recent_person_evidence:
+            if latest_class == "dog" and scores["dog"] > scores["person"] + CLASS_DOG_OVERRIDE_MARGIN and latest_run >= CLASS_SWITCH_CONFIRM_FRAMES:
+                return "dog", "dog_overrode_person"
+            return "person", "human_priority"
+
+        if top_score < CLASS_UNKNOWN_MIN_CONF:
+            return "unknown", "low_score"
+
+        if total_score > 0 and (top_score / total_score) < CLASS_DOMINANCE_RATIO:
+            return "unknown", "ambiguous"
+
+        if latest_class in {"cat", "dog"}:
+            if latest_run >= CLASS_SWITCH_CONFIRM_FRAMES and top_class == latest_class:
+                return latest_class, "confirmed_pet"
+            return "unknown", "waiting_for_streak"
+
+        if top_class in self._class_labels:
+            return top_class, "top_score"
+
+        return "unknown", "fallback"
+
+    # ------------------------------------------------------------------
+    def _display_label_for_track(self, track: dict) -> str:
+        label = str(track.get("label") or track.get("class") or "unknown").strip() or "unknown"
+        display_class = str(track.get("display_class") or "unknown")
+        label_source = str(track.get("label_source") or "default")
+
+        if label_source == "face":
+            return label
+        if label_source in {"manual", "pet_match"}:
+            return label if display_class in {"cat", "dog"} else display_class
+        if label in self._class_labels:
+            return display_class
+        return label
+
+    # ------------------------------------------------------------------
+    def _finalize_display_state(self, track: dict, det: dict, raw_conf: float, previous_display_class: str | None) -> None:
+        display_class, reason = self._resolve_display_class(track)
+        if display_class != previous_display_class:
+            track["display_class_flips"] = int(track.get("display_class_flips", 0) or 0) + 1
+        track["display_class"] = display_class
+        track["display_class_reason"] = reason
+        track["display_label"] = self._display_label_for_track(track)
+
+        det["display_class"] = track["display_class"]
+        det["display_label"] = track["display_label"]
+        det["display_class_reason"] = reason
+        det["display_class_flips"] = track.get("display_class_flips", 0)
+
+        if DEBUG_CLASS_LABELS:
+            logger.debug(
+                "detect: track %s raw=%s conf=%.2f face=%s display=%s label=%s flip=%s reason=%s",
+                track["track_id"],
+                det.get("class", "unknown"),
+                raw_conf,
+                bool(det.get("face_visible")),
+                track["display_class"],
+                track["display_label"],
+                previous_display_class != display_class,
+                reason,
+            )
+
+    # ------------------------------------------------------------------
+    def _apply_track_label(self, track: dict, det_class: str, new_label: str, new_dist: float, matcher_active: bool, pet_match: dict | None) -> None:
+        """Update the semantic label for a matched track."""
 
         if det_class == "person" and new_label != "person":
-            # Face recognition fired this frame.
             if track["label_source"] == "default":
-                # First confirmed name — accept immediately.
-                track["label"]        = new_label
+                track["label"] = new_label
                 track["label_source"] = "face"
-                track["best_dist"]    = new_dist
-            elif new_dist < track["best_dist"] - TRACK_RELABEL_MARGIN:
-                # Clearly better match — allow relabel.
-                track["label"]     = new_label
                 track["best_dist"] = new_dist
-            # else: keep current sticky label (ignore small fluctuations)
+            elif new_dist < track["best_dist"] - TRACK_RELABEL_MARGIN:
+                track["label"] = new_label
+                track["best_dist"] = new_dist
         elif det_class in {"cat", "dog"}:
-            pet_match = det.pop("_pet_match", None)
-            matcher_active = bool(det.pop("_pet_matcher_active", False))
+            if track.get("display_class") == "person" or int(track.get("person_evidence_frames", 0) or 0) > 0:
+                if track["label"] in self._class_labels and track["label_source"] != "manual":
+                    track["label"] = "person"
+                    track["label_source"] = "default"
+                track["pet_grace_remaining"] = 0
+                track["pet_identity_score"] = 0.0
+                return
+
             if not matcher_active:
                 track["label"] = new_label
                 track["label_source"] = "manual" if new_label != det_class else "default"
@@ -302,13 +400,130 @@ class _DetectionTracker:
                 track["label_source"] = "default"
                 track["pet_identity_score"] = 0.0
                 track["pet_grace_remaining"] = 0
-        elif det_class != "person":
-            track["label"] = new_label
+
+    # ------------------------------------------------------------------
+    def update(self, detections: list[dict]) -> None:
+        """Match *detections* to existing tracks; mutate each in-place.
+
+        After this call every det will have:
+        - ``track_id``  – stable integer ID
+        - ``track_hits`` – number of matched frames seen for that track
+        - ``label``     – sticky identity label for people; current label for pets
+        The internal ``_face_dist`` key is consumed here and removed."""
+
+        now = time.time()
+        matched_track_ids: set[int] = set()
+        matched_det_idxs:  set[int] = set()
+
+        # ── greedy IoU matching ───────────────────────────────────────────
+        for det_i, det in enumerate(detections):
+            det_class = det.get("class", "")
+            best_score = 0.0
+            best_track = None
+            best_reason = ""
+            for track in self._tracks:
+                if track["track_id"] in matched_track_ids:
+                    continue
+                match_score = self._track_match_score(det, track)
+                if match_score is None:
+                    continue
+                score, reason = match_score
+                if score > best_score:
+                    best_score = score
+                    best_track = track
+                    best_reason = reason
+
+            if best_track is not None:
+                self._merge(det, best_track, now, best_reason)
+                matched_track_ids.add(best_track["track_id"])
+                matched_det_idxs.add(det_i)
+                continue
+
+            # ── new track ─────────────────────────────────────────────────
+            raw_label  = det.get("label", det_class or "object")
+            raw_dist   = det.pop("_face_dist", 1.0)
+            det.pop("_pet_match", None)
+            det.pop("_pet_matcher_active", None)
+            conf = float(det.get("conf", 0.0) or 0.0)
+            new_track  = {
+                "track_id":     self._next_id,
+                "class":        det_class,
+                "box":          det["box"][:],
+                "label":        raw_label,
+                "label_source": (
+                    "face"
+                    if det_class == "person" and raw_label != "person"
+                    else "manual" if det_class in {"cat", "dog"} and raw_label != det_class else "default"
+                ),
+                "best_dist":    raw_dist if det_class == "person" and raw_label != "person" else 1.0,
+                "miss_count":   0,
+                "last_seen":    now,
+                "track_hits":   1,
+                "pet_grace_remaining": 0,
+                "pet_identity_score": 0.0,
+                "class_history": [],
+                "display_class": "unknown",
+                "display_class_reason": "new_track",
+                "display_class_flips": 0,
+                "person_evidence_frames": 0,
+            }
+            self._next_id += 1
+            self._tracks.append(new_track)
+            det["track_id"] = new_track["track_id"]
+            det["track_hits"] = new_track["track_hits"]
+            det["label"] = new_track["label"]
+            self._append_class_history(new_track, det_class, conf, bool(det.get("face_visible")))
+            self._finalize_display_state(new_track, det, conf, None)
+            matched_det_idxs.add(det_i)
+
+        # ── age unmatched tracks ──────────────────────────────────────────
+        for track in self._tracks:
+            if track["track_id"] not in matched_track_ids:
+                track["miss_count"] += 1
+
+        # ── prune expired tracks ──────────────────────────────────────────
+        self._tracks = [t for t in self._tracks if t["miss_count"] <= TRACK_MAX_MISS]
+
+    # ------------------------------------------------------------------
+    def _merge(self, det: dict, track: dict, now: float, _match_reason: str = "") -> None:
+        """Update *track* position + label from a matched *det*."""
+        previous_display_class = str(track.get("display_class") or "unknown")
+        track["box"]        = det["box"][:]
+        track["miss_count"] = 0
+        track["last_seen"]  = now
+        track["track_hits"] += 1
+
+        det_class = det.get("class", "")
+        new_label = det.get("label", det_class or "object")
+        new_dist  = det.pop("_face_dist", 1.0)
+        conf      = float(det.get("conf", 0.0) or 0.0)
+        face_visible = bool(det.get("face_visible"))
+
+        track["class"] = det_class
+        self._append_class_history(track, det_class, conf, face_visible)
+
+        if det_class == "person" and new_label != "person":
+            # Face recognition fired this frame.
+            if track["label_source"] == "default":
+                # First confirmed name — accept immediately.
+                track["label"]        = new_label
+                track["label_source"] = "face"
+                track["best_dist"]    = new_dist
+            elif new_dist < track["best_dist"] - TRACK_RELABEL_MARGIN:
+                # Clearly better match — allow relabel.
+                track["label"]     = new_label
+                track["best_dist"] = new_dist
+            # else: keep current sticky label (ignore small fluctuations)
+        elif det_class in {"cat", "dog"}:
+            pet_match = det.pop("_pet_match", None)
+            matcher_active = bool(det.pop("_pet_matcher_active", False))
+            self._apply_track_label(track, det_class, new_label, new_dist, matcher_active, pet_match)
 
         # Always propagate current track label to the detection dict.
         det["label"]    = track["label"]
         det["track_id"] = track["track_id"]
         det["track_hits"] = track["track_hits"]
+        self._finalize_display_state(track, det, conf, previous_display_class)
 
     # ------------------------------------------------------------------
     def reset(self) -> None:

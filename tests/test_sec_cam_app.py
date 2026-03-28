@@ -314,6 +314,9 @@ def test_main_page_includes_live_enroll_selection_persistence_guards(monkeypatch
     assert b"const enrollModalState = {" in response.data
     assert b"!enrollModalState.open" in response.data
     assert b"detectCtx.setLineDash([8, 6]);" in response.data
+    assert b"display_label || d.label || d.class" in response.data
+    assert b"id=\"detectModel\"" in response.data
+    assert b"minmax(480px, 1.35fr) minmax(320px, 0.75fr)" in response.data
 
 
 def test_review_candidates_list_route(monkeypatch):
