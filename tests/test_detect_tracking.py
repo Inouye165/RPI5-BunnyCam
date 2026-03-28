@@ -44,11 +44,13 @@ def _fresh_module():
 # Helper factories
 # ---------------------------------------------------------------------------
 
-def _person(box, label="person", face_dist=None):
+def _person(box, label="person", face_dist=None, face_visible=False):
     """Build a minimal person detection dict as _run() would produce."""
     d = {"label": label, "class": "person", "conf": 0.85, "box": list(box)}
     if face_dist is not None:
         d["_face_dist"] = face_dist
+    if face_visible:
+        d["face_visible"] = True
     return d
 
 
@@ -117,6 +119,31 @@ class TestBasicTracking:
 # ---------------------------------------------------------------------------
 
 class TestStickyIdentity:
+    def test_single_dog_frame_does_not_flip_person_track(self, _fresh_module):
+        d = _fresh_module
+        det1 = _person(_box(0.1, 0.1, 0.4, 0.8), label="Ron", face_dist=0.30, face_visible=True)
+        d._tracker.update([det1])
+        tid = det1["track_id"]
+
+        det2 = {"label": "dog", "class": "dog", "conf": 0.91, "box": _box(0.11, 0.10, 0.41, 0.80)}
+        d._tracker.update([det2])
+
+        assert det2["track_id"] == tid, "transient dog guess should stay on the same track"
+        assert det2["display_label"] != "dog"
+        assert det2["display_class"] in {"person", "unknown"}
+
+    def test_dog_display_waits_for_confirmation_then_sets_unknown_first(self, _fresh_module):
+        d = _fresh_module
+        det1 = {"label": "dog", "class": "dog", "conf": 0.86, "box": _box(0.2, 0.2, 0.5, 0.7)}
+        d._tracker.update([det1])
+        assert det1["display_class"] == "unknown"
+        assert det1["display_label"] == "unknown"
+
+        det2 = {"label": "dog", "class": "dog", "conf": 0.88, "box": _box(0.21, 0.2, 0.51, 0.7)}
+        d._tracker.update([det2])
+        assert det2["display_class"] == "dog"
+        assert det2["display_label"] == "dog"
+
     def test_recognized_name_sticks_on_next_frame_without_face_match(self, _fresh_module):
         """Once named, the track should keep that name even when face recognition
         does not fire (no _face_dist in the detection dict)."""
@@ -130,6 +157,17 @@ class TestStickyIdentity:
         det2 = _person(_box(0.12, 0.10, 0.42, 0.80))
         d._tracker.update([det2])
         assert det2["label"] == "Ron", "name should persist without face match"
+
+    def test_face_visible_person_evidence_wins_over_dog_guess(self, _fresh_module):
+        d = _fresh_module
+        det1 = _person(_box(0.12, 0.10, 0.42, 0.80), face_visible=True)
+        d._tracker.update([det1])
+
+        det2 = {"label": "dog", "class": "dog", "conf": 0.89, "box": _box(0.13, 0.11, 0.43, 0.81)}
+        d._tracker.update([det2])
+
+        assert det2["display_label"] != "dog"
+        assert det2["display_class"] == "person"
 
     def test_name_persists_for_multiple_miss_frames(self, _fresh_module):
         """Label should survive TRACK_MAX_MISS - 1 consecutive missed frames."""

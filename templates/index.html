@@ -12,7 +12,7 @@
     /* ── App shell ─────────────────────────────────────── */
     .app-shell {
       display: grid;
-      grid-template-columns: clamp(220px, 25vw, 420px) 1fr;
+      grid-template-columns: minmax(480px, 1.35fr) minmax(320px, 0.75fr);
       grid-template-rows: auto 1fr;
       height: 100dvh;
       gap: 0;
@@ -30,7 +30,7 @@
     .video-card {
       display: flex; flex-direction: column; gap: 6px;
       min-height: 0; overflow: hidden;
-      padding: 8px; border-radius: 14px;
+      padding: 6px; border-radius: 14px;
       background: #f7f7f8; border: 1px solid #e0e0e0;
     }
     .video-card .videoWrap { position: relative; width: 100%; flex: 0 1 auto; min-height: 0; }
@@ -134,6 +134,13 @@
       display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
     }
     .detect-title { font-size: 13px; font-weight: 800; color: #2c4a9e; white-space: nowrap; }
+    .detect-model {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 999px;
+      border: 1px solid #2c4a9e; background: #fff;
+      color: #2c4a9e; font-size: 11px; font-weight: 800;
+      letter-spacing: 0.02em; white-space: nowrap;
+    }
     .detect-badge {
       display: inline-block; padding: 2px 8px; border-radius: 6px;
       font-size: 11px; font-weight: 800; letter-spacing: 0.5px;
@@ -312,6 +319,7 @@
       <div id="detectPanel" class="detect-panel">
         <span class="detect-title">&#x1F50E; Detect</span>
         <span id="detectBadge" class="detect-badge off">OFF</span>
+        <span id="detectModel" class="detect-model">Model: loading&hellip;</span>
         <span id="detectSeen" class="detect-seen">&#x23F3; starting&hellip;</span>
         <form id="enrollForm" onsubmit="return enrollFace(event)">
           <input id="enrollName"  type="text" placeholder="Name (Ron / Trisha)" maxlength="32"/>
@@ -936,6 +944,7 @@ async function pollLiveState({ signal } = {}) {
   if (currentMode === 'live') {
     applyDetections(d);
   }
+  setDetectModel(s.detection_model);
 }
 
 // Initial config
@@ -964,13 +973,20 @@ const detectCanvas = document.getElementById('detectCanvas');
 const detectCtx    = detectCanvas.getContext('2d');
 const detectSeen   = document.getElementById('detectSeen');
 const detectBadge  = document.getElementById('detectBadge');
+const detectModel  = document.getElementById('detectModel');
 
 const DET_COLORS = {
   person: '#2196F3', dog: '#4CAF50', cat: '#9C27B0',
   Ron: '#FF5722', Trisha: '#E91E63',
 };
-function detColor(label, cls) {
-  return DET_COLORS[label] || DET_COLORS[cls] || '#FF9800';
+function detDisplayClass(d) {
+  return d.display_class || d.class || 'unknown';
+}
+function detDisplayLabel(d) {
+  return d.display_label || d.label || d.class || 'unknown';
+}
+function detColor(d) {
+  return DET_COLORS[detDisplayLabel(d)] || DET_COLORS[detDisplayClass(d)] || '#FF9800';
 }
 
 let lastDetections = [];
@@ -1016,7 +1032,7 @@ function drawDetections(dets) {
   let selectedDrawn = false;
   for (let i = 0; i < dets.length; i++) {
     const d = dets[i];
-    const col = detColor(d.label, d.class);
+    const col = detColor(d);
     const [x1, y1, x2, y2] = d.box;
     const bx = x1*w, by = y1*h, bw = (x2-x1)*w, bh = (y2-y1)*h;
 
@@ -1032,7 +1048,7 @@ function drawDetections(dets) {
     detectCtx.lineWidth   = 2.5;
     detectCtx.strokeRect(bx, by, bw, bh);
 
-    const txt = d.label + ' ' + Math.round(d.conf * 100) + '%';
+    const txt = detDisplayLabel(d) + ' ' + Math.round(d.conf * 100) + '%';
     const tw  = detectCtx.measureText(txt).width + 10;
 
     // Label placement: prefer above; if clipped at top, place inside box
@@ -1085,7 +1101,7 @@ function selectDetection(idx) {
   drawDetections(lastDetections);
 
   // Update selection banner
-  selLabel.textContent = 'Selected: ' + det.label + ' (' + Math.round(det.conf * 100) + '%)';
+  selLabel.textContent = 'Selected: ' + detDisplayLabel(det) + ' (' + Math.round(det.conf * 100) + '%)';
   selHint.textContent = 'Click \"Name selected box\" to enroll';
   nameSelectedBtn.disabled = false;
   selectedBanner.style.display = '';
@@ -1127,7 +1143,7 @@ function showEnrollModal(det, idx) {
   overlay.innerHTML = `
     <div class="enroll-modal">
       <h3>Name this ${cls}</h3>
-      <div class="det-preview">${det.label} &mdash; ${Math.round(det.conf * 100)}% confidence</div>
+      <div class="det-preview">${detDisplayLabel(det)} &mdash; ${Math.round(det.conf * 100)}% confidence</div>
       <label for="enrollModalName">Name</label>
       <input id="enrollModalName" type="text" maxlength="32" placeholder="${isPet ? 'e.g. Mochi' : 'e.g. Ron'}"/>
       ${!isPet ? '<div style="font-size:11px;color:#888;margin-top:4px;">Requires face_recognition. The current live frame will be used.</div>' : ''}
@@ -1188,6 +1204,11 @@ function setDetectBadge(enabled, reason) {
   }
 }
 
+function setDetectModel(modelName) {
+  const text = (modelName || 'none').trim() || 'none';
+  detectModel.textContent = 'Model: ' + text;
+}
+
 function applyDetections(d) {
   const dets = d.detections || [];
   lastDetections = dets;
@@ -1225,7 +1246,7 @@ function applyDetections(d) {
       if (enrollModalState.open) {
         enrollModalState.selectedDet = { ...dets[found], box: [...dets[found].box] };
       }
-      selLabel.textContent = 'Selected: ' + dets[found].label + ' (' + Math.round(dets[found].conf * 100) + '%)';
+        selLabel.textContent = 'Selected: ' + detDisplayLabel(dets[found]) + ' (' + Math.round(dets[found].conf * 100) + '%)';
     } else if (!enrollModalState.open) {
       clearSelection();
     } else {
@@ -1238,7 +1259,7 @@ function applyDetections(d) {
   if (!d.enabled) {
           detectSeen.textContent = d.reason || 'detection unavailable';
   } else if (dets.length) {
-    detectSeen.textContent = dets.map(x => x.label).join(', ');
+    detectSeen.textContent = dets.map(x => detDisplayLabel(x)).join(', ');
   } else {
     detectSeen.textContent = 'nothing detected';
     detectCtx.clearRect(0, 0, detectCanvas.width, detectCanvas.height);
