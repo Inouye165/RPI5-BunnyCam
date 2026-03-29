@@ -14,6 +14,7 @@ from urllib.parse import quote
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from candidate_collection import encode_rgb_bmp
+from hailo_status import get_hailo_status
 from identity_gallery import ReviewedIdentityPromoter
 from reviewed_export import ReviewedDatasetExporter
 from review_queue import CandidateReviewQueue
@@ -246,6 +247,7 @@ bg_lock = Lock()
 state_lock = Lock()
 bg_model = {"bg": None, "warmup": 3}
 motion_state = {
+    "motion": False,
     "events": 0,
     "last_motion_ts": None,
     "last_snapshot": None,
@@ -631,6 +633,15 @@ def blur3x3(g):
     ) / 9.0
 
 
+def motion_thresholds(base_min_changed, roi_area, full_area):
+    roi_area = max(1, int(roi_area))
+    full_area = max(1, int(full_area))
+    scaled_min_changed = int(round(float(base_min_changed) * (roi_area / full_area)))
+    effective_min_changed = max(1, min(roi_area, scaled_min_changed))
+    suspect_thr = max(1, min(roi_area, int(round(effective_min_changed * 0.05))))
+    return effective_min_changed, suspect_thr
+
+
 # --------------------
 # Motion detection loop
 # --------------------
@@ -664,8 +675,11 @@ def motion_loop():
         with caminfo_lock:
             full_area = max(1, caminfo["down_w"] * caminfo["down_h"])
         roi_area = max(1, int(gray.shape[0] * gray.shape[1]))
-        effective_min_changed = max(50, int(base_min_changed * (roi_area / full_area)))
-        suspect_thr = max(25, int(effective_min_changed * 0.05))  # instant trigger
+        effective_min_changed, suspect_thr = motion_thresholds(
+            base_min_changed,
+            roi_area,
+            full_area,
+        )
 
         with bg_lock:
             if bg_model["warmup"] > 0 or bg_model["bg"] is None:
@@ -1022,6 +1036,7 @@ def _selected_backend_name():
 
 
 def _detection_status_payload():
+    hailo_status = get_hailo_status()
     if _detect is None:
         return {
             "detection_enabled": False,
@@ -1045,9 +1060,11 @@ def _detection_status_payload():
                 "saved_total": 0,
                 "saved_by_class": {},
             },
+            "accelerator": hailo_status,
         }
 
     detect_status = _detect.get_status()
+    hailo_status = detect_status.get("accelerator", hailo_status)
     return {
         "detection_enabled": bool(detect_status.get("detection_enabled", False)),
         "detection_reason": detect_status.get("detection_reason"),
@@ -1070,6 +1087,7 @@ def _detection_status_payload():
             "saved_total": 0,
             "saved_by_class": {},
         }),
+        "accelerator": hailo_status,
     }
 
 
@@ -1618,7 +1636,7 @@ def _graceful_shutdown(_signum, _frame):
             if runtime_state["camera_backend"] is not None:
                 runtime_state["camera_backend"].stop()
     finally:
-        pass
+        raise SystemExit(0)
 
 
 def _start_worker_threads():

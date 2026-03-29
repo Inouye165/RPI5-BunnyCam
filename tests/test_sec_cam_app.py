@@ -199,6 +199,22 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["pet_identity_matching"]["pet_sample_counts"]["Dobby"] == 3
     assert payload["candidate_collection"]["saved_total"] == 2
     assert payload["app_version"]["display"] == "v0.3.0 (main@abc1234)"
+    assert payload["motion"] is False
+
+
+def test_motion_thresholds_scale_down_for_small_roi(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    effective_min_changed, suspect_threshold = module.motion_thresholds(
+        base_min_changed=1800,
+        roi_area=100,
+        full_area=160 * 120,
+    )
+
+    assert effective_min_changed < 50
+    assert effective_min_changed <= 100
+    assert suspect_threshold < 25
+    assert suspect_threshold >= 1
 
 
 def test_version_endpoint(monkeypatch):
@@ -433,22 +449,24 @@ def test_review_export_route(monkeypatch):
 
 
 def test_review_training_dataset_status_route(monkeypatch):
+    import os
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    _base = module.BASE_DIR
     monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
         get_status=lambda: {
             "generated_at": "2026-03-26T07:20:00Z",
             "package_name": "20260326_072000",
-            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "training_root": os.path.join(_base, "data", "training"),
             "detection": {
-                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000",
-                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072000/manifest.json",
+                "dataset_path": os.path.join(_base, "data", "training", "detection", "20260326_072000"),
+                "manifest_path": os.path.join(_base, "data", "training", "detection", "20260326_072000", "manifest.json"),
                 "item_count": 2,
                 "class_counts": {"dog": 1, "person": 1},
                 "validation": {"error_count": 0, "errors": []},
             },
             "identity": {
-                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000",
-                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072000/manifest.json",
+                "dataset_path": os.path.join(_base, "data", "training", "identity", "20260326_072000"),
+                "manifest_path": os.path.join(_base, "data", "training", "identity", "20260326_072000", "manifest.json"),
                 "item_count": 1,
                 "identity_counts": {"Ron": 1},
                 "validation": {"error_count": 0, "errors": []},
@@ -469,22 +487,24 @@ def test_review_training_dataset_status_route(monkeypatch):
 
 
 def test_review_package_training_datasets_route(monkeypatch):
+    import os
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    _base = module.BASE_DIR
     monkeypatch.setattr(module, "_training_packager", types.SimpleNamespace(
         package_training_datasets=lambda **_kwargs: {
             "generated_at": "2026-03-26T07:21:00Z",
             "package_name": "20260326_072100",
-            "training_root": "c:/Users/inouy/RPI5-BunnyCam/data/training",
+            "training_root": os.path.join(_base, "data", "training"),
             "detection": {
-                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100",
-                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/detection/20260326_072100/manifest.json",
+                "dataset_path": os.path.join(_base, "data", "training", "detection", "20260326_072100"),
+                "manifest_path": os.path.join(_base, "data", "training", "detection", "20260326_072100", "manifest.json"),
                 "item_count": 4,
                 "class_counts": {"dog": 2, "person": 2},
                 "validation": {"error_count": 0, "errors": []},
             },
             "identity": {
-                "dataset_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100",
-                "manifest_path": "c:/Users/inouy/RPI5-BunnyCam/data/training/identity/20260326_072100/manifest.json",
+                "dataset_path": os.path.join(_base, "data", "training", "identity", "20260326_072100"),
+                "manifest_path": os.path.join(_base, "data", "training", "identity", "20260326_072100", "manifest.json"),
                 "item_count": 3,
                 "identity_counts": {"Dobby": 2, "Ron": 1},
                 "validation": {"error_count": 0, "errors": []},

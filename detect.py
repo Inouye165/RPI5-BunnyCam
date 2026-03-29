@@ -37,8 +37,14 @@ from typing import Callable
 import numpy as np
 
 from candidate_collection import CandidateCollector, CandidateCollectorConfig
+from hailo_status import get_hailo_status
 from identity_gallery import load_known_face_gallery
 from pet_identity import PetIdentityMatcher
+
+try:
+    import cv2  # type: ignore
+except ImportError:
+    cv2 = None
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +83,41 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return bool(default)
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _normalize_detect_mode(raw_value: str | None) -> str:
+    value = (raw_value or "hailo-yolov8s").strip().lower()
+    aliases = {
+        "auto": "hailo-yolov8s",
+        "hailo": "hailo-yolov8s",
+        "full": "hailo-yolov8s",
+        "hailo-full": "hailo-yolov8s",
+        "yolov8s": "hailo-yolov8s",
+        "hailo-yolov8s": "hailo-yolov8s",
+        "hybrid": "hailo-hybrid",
+        "hailo-hybrid": "hailo-hybrid",
+        "personface": "hailo-hybrid",
+        "ultralytics": "ultralytics",
+        "yolo": "ultralytics",
+    }
+    return aliases.get(value, "hailo-yolov8s")
+
 # ── tunables ──────────────────────────────────────────────────────────────────
 DETECT_FPS   = 2.0   # detections per second
 DETECT_CONF  = 0.40  # YOLO minimum confidence
 FACE_DIST    = 0.50  # face_recognition distance threshold (lower = stricter)
+USE_HAILO = _env_bool("BUNNYCAM_USE_HAILO", True)
+DETECT_MODE = _normalize_detect_mode(os.getenv("BUNNYCAM_DETECT_MODE"))
+HAILO_CONF = _env_float("BUNNYCAM_HAILO_CONF", 0.40, minimum=0.0, maximum=1.0)
+HAILO_INPUT_SIZE = _env_int("BUNNYCAM_HAILO_INPUT", 640, minimum=64, maximum=2048)
+HAILO_YOLOV8S_HEF_PATH = os.getenv(
+    "BUNNYCAM_HAILO_HEF",
+    "/usr/share/hailo-models/yolov8s_h8.hef",
+)
+HAILO_PERSONFACE_HEF_PATH = os.getenv(
+    "BUNNYCAM_HAILO_PERSONFACE_HEF",
+    "/usr/share/hailo-models/yolov5s_personface_h8l.hef",
+)
+HAILO_PERSONFACE_LABELS = ("person", "face")
 
 # ── person-tracking tunables ───────────────────────────────────────────────────
 # IoU >= this threshold to match a new detection to an existing track.
@@ -115,13 +152,32 @@ PET_MATCH_SWITCH_MARGIN = 0.08
 # COCO-80 class IDs we care about
 WATCH_CLASSES: dict[int, str] = {0: "person", 15: "cat", 16: "dog"}
 
+
+def _hailo_profile() -> dict[str, object]:
+    if DETECT_MODE == "hailo-hybrid":
+        return {
+            "name": "hailo-personface",
+            "hef_path": HAILO_PERSONFACE_HEF_PATH,
+            "class_map": {index: label for index, label in enumerate(HAILO_PERSONFACE_LABELS)},
+            "face_labels": {"face"},
+            "integration_mode": "hybrid",
+        }
+    return {
+        "name": "hailo-yolov8s",
+        "hef_path": HAILO_YOLOV8S_HEF_PATH,
+        "class_map": dict(WATCH_CLASSES),
+        "face_labels": set(),
+        "integration_mode": "hailo-full",
+    }
+
 FACES_DIR = os.path.join(os.path.dirname(__file__), "faces")
 LABELS_FILE = os.path.join(FACES_DIR, "labels.json")
 CANDIDATE_ROOT = os.path.join(BASE_DIR, "data", "candidates")
 
 # ── module-level state ────────────────────────────────────────────────────────
 _lock        = threading.Lock()
-_models: dict = {"yolo": None, "fr": None}
+_models: dict = {"yolo": None, "hailo": None, "fr": None}
+_backend_errors: dict[str, str | None] = {"yolo": None, "hailo": None}
 _known_names: list[str]       = []
 _known_encs:  list[np.ndarray] = []
 _pet_labels:  dict[str, str]  = {}   # class → pet name  ("cat" → "Mochi")
@@ -215,16 +271,11 @@ class _DetectionTracker:
             return None
 
         recent_person = int(track.get("person_evidence_frames", 0) or 0) > 0 or track.get("display_class") == "person"
+        score_bonus = 0.2 if recent_person and det_class in {"cat", "dog"} else 0.0
         if iou >= TRACK_CROSS_CLASS_IOU_MIN:
-            score = 1.0 + iou
-            if recent_person and det_class == "dog":
-                score += 0.15
-            return score, "cross_iou"
+            return 1.0 + iou + score_bonus, "cross_iou"
         if cdist <= TRACK_CROSS_CLASS_CDIST_MAX:
-            score = 0.8 + (TRACK_CROSS_CLASS_CDIST_MAX - cdist)
-            if recent_person and det_class == "dog":
-                score += 0.15
-            return score, "cross_cdist"
+            return 0.8 + (TRACK_CROSS_CLASS_CDIST_MAX - cdist) + score_bonus, "cross_cdist"
         return None
 
     # ------------------------------------------------------------------
@@ -551,17 +602,133 @@ def _set_face_status(enabled: bool, reason: str | None) -> None:
         _status["face_recognition_enabled"] = bool(enabled)
         _status["face_recognition_reason"] = reason
 
+
+def _compose_detection_error() -> str:
+    reasons: list[str] = []
+    if _backend_errors.get("hailo"):
+        reasons.append(f"Hailo: {_backend_errors['hailo']}")
+    if _backend_errors.get("yolo"):
+        reasons.append(f"Ultralytics: {_backend_errors['yolo']}")
+    return "; ".join(reasons) or "No detection backend loaded"
+
+
+def _current_model_name() -> str:
+    hailo_ready = _models["hailo"] is not None
+    yolo_ready = _models["yolo"] is not None
+    if DETECT_MODE == "hailo-hybrid":
+        if hailo_ready and yolo_ready:
+            return "hailo-personface+yolov8n-pets"
+        if hailo_ready:
+            return "hailo-personface"
+        if yolo_ready:
+            return "yolov8n"
+        return "none"
+    if DETECT_MODE == "ultralytics":
+        return "yolov8n" if yolo_ready else "none"
+    if hailo_ready:
+        return "hailo-yolov8s"
+    if yolo_ready:
+        return "yolov8n"
+    return "none"
+
+
+def _refresh_detection_backend_status() -> None:
+    model_name = _current_model_name()
+    with _lock:
+        _latest["model"] = model_name
+    if model_name == "none":
+        _set_detection_status(False, _compose_detection_error())
+    else:
+        _set_detection_status(True, None)
+
+
+def _current_accelerator_status() -> dict:
+    model_name = _current_model_name()
+    hailo_ready = _models["hailo"] is not None
+    yolo_ready = _models["yolo"] is not None
+
+    if DETECT_MODE == "hailo-hybrid" and hailo_ready and yolo_ready:
+        return get_hailo_status(
+            active_backend="hailo-personface+yolo-pets",
+            integration_mode="hybrid",
+            model_name=model_name,
+        )
+
+    if DETECT_MODE == "hailo-hybrid" and hailo_ready:
+        return get_hailo_status(
+            active_backend="hailo-personface",
+            integration_mode="personface-only",
+            model_name=model_name,
+        )
+
+    if DETECT_MODE == "hailo-yolov8s" and hailo_ready:
+        return get_hailo_status(
+            active_backend="hailo-yolov8s",
+            integration_mode="hailo-full",
+            model_name=model_name,
+        )
+
+    if DETECT_MODE == "ultralytics":
+        return get_hailo_status(
+            active_backend="ultralytics",
+            integration_mode="ultralytics-only",
+            model_name=model_name,
+        )
+
+    integration_mode = "disabled" if not USE_HAILO else "status-only"
+    if USE_HAILO and yolo_ready and _backend_errors.get("hailo"):
+        integration_mode = "fallback-ultralytics"
+    return get_hailo_status(
+        active_backend="ultralytics",
+        integration_mode=integration_mode,
+        model_name=model_name,
+    )
+
 def _load_yolo() -> None:
     try:
         from ultralytics import YOLO  # type: ignore
         _models["yolo"] = YOLO("yolov8n.pt")  # downloads ~6 MB on first run
-        with _lock:
-            _latest["model"] = "yolov8n"
-        _set_detection_status(True, None)
+        _backend_errors["yolo"] = None
+        _refresh_detection_backend_status()
         logger.info("detect: YOLOv8n ready")
     except (ImportError, OSError, RuntimeError) as exc:
-        _set_detection_status(False, str(exc))
+        _backend_errors["yolo"] = str(exc)
+        _refresh_detection_backend_status()
         logger.warning("detect: YOLO unavailable — %s", exc)
+
+
+def _load_hailo() -> None:
+    if not USE_HAILO:
+        _backend_errors["hailo"] = "disabled by BUNNYCAM_USE_HAILO"
+        _refresh_detection_backend_status()
+        logger.info("detect: Hailo backend disabled by configuration")
+        return
+
+    if DETECT_MODE == "ultralytics":
+        _backend_errors["hailo"] = "disabled by BUNNYCAM_DETECT_MODE=ultralytics"
+        _refresh_detection_backend_status()
+        logger.info("detect: Hailo backend disabled by detector mode")
+        return
+
+    try:
+        if cv2 is None:
+            raise ImportError("opencv-python not available")
+        from picamera2.devices.hailo import Hailo  # type: ignore
+
+        hailo_profile = _hailo_profile()
+        hef_path = str(hailo_profile["hef_path"])
+
+        if not os.path.exists(hef_path):
+            raise OSError(f"HEF not found at {hef_path}")
+
+        _models["hailo"] = Hailo(hef_path)
+        _backend_errors["hailo"] = None
+        _refresh_detection_backend_status()
+        logger.info("detect: Hailo backend ready (%s, mode=%s)", hef_path, DETECT_MODE)
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        _backend_errors["hailo"] = str(exc)
+        _refresh_detection_backend_status()
+        logger.warning("detect: Hailo backend unavailable — %s", exc)
 
 
 def _load_faces() -> None:
@@ -663,9 +830,143 @@ def _prepare_face_crop(frame_rgb: np.ndarray) -> np.ndarray | None:
     return np.ascontiguousarray(frame_rgb, dtype=np.uint8)
 
 
+def _prepare_hailo_input(frame_rgb: np.ndarray) -> tuple[np.ndarray, float, int, int] | None:
+    if cv2 is None or frame_rgb.size == 0:
+        return None
+
+    frame_h, frame_w = frame_rgb.shape[:2]
+    if frame_h <= 0 or frame_w <= 0:
+        return None
+
+    scale = min(HAILO_INPUT_SIZE / frame_w, HAILO_INPUT_SIZE / frame_h)
+    scaled_w = max(1, int(round(frame_w * scale)))
+    scaled_h = max(1, int(round(frame_h * scale)))
+    resized = cv2.resize(frame_rgb, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((HAILO_INPUT_SIZE, HAILO_INPUT_SIZE, 3), dtype=np.uint8)
+    pad_x = (HAILO_INPUT_SIZE - scaled_w) // 2
+    pad_y = (HAILO_INPUT_SIZE - scaled_h) // 2
+    canvas[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = resized
+    return canvas, scale, pad_x, pad_y
+
+
+def _map_hailo_box_to_frame(
+    row: np.ndarray,
+    frame_w: int,
+    frame_h: int,
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+) -> list[float] | None:
+    if len(row) < 5 or frame_w <= 0 or frame_h <= 0 or scale <= 0:
+        return None
+
+    y1, x1, y2, x2 = [float(value) for value in row[:4]]
+    x1 = ((x1 * HAILO_INPUT_SIZE) - pad_x) / scale
+    x2 = ((x2 * HAILO_INPUT_SIZE) - pad_x) / scale
+    y1 = ((y1 * HAILO_INPUT_SIZE) - pad_y) / scale
+    y2 = ((y2 * HAILO_INPUT_SIZE) - pad_y) / scale
+
+    x1 = min(frame_w, max(0.0, x1))
+    x2 = min(frame_w, max(0.0, x2))
+    y1 = min(frame_h, max(0.0, y1))
+    y2 = min(frame_h, max(0.0, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return [
+        round(x1 / frame_w, 4),
+        round(y1 / frame_h, 4),
+        round(x2 / frame_w, 4),
+        round(y2 / frame_h, 4),
+    ]
+
+
+def _face_matches_person(person_box: list[float], face_box: list[float]) -> bool:
+    face_cx = (face_box[0] + face_box[2]) / 2.0
+    face_cy = (face_box[1] + face_box[3]) / 2.0
+    if person_box[0] <= face_cx <= person_box[2] and person_box[1] <= face_cy <= person_box[3]:
+        return True
+    return _iou(person_box, face_box) >= 0.02
+
+
+def _decode_hailo_outputs(
+    outputs: list[np.ndarray],
+    frame_shape: tuple[int, int, int],
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+    class_map: dict[int, str],
+    face_labels: set[str] | None = None,
+) -> tuple[list[dict], list[list[float]]]:
+    frame_h, frame_w = frame_shape[:2]
+    detections: list[dict] = []
+    face_boxes: list[list[float]] = []
+    face_label_set = set(face_labels or set())
+
+    for class_index, rows in enumerate(outputs):
+        class_name = class_map.get(class_index)
+        if class_name is None:
+            continue
+        if rows is None:
+            continue
+        class_rows = np.asarray(rows)
+        if class_rows.size == 0:
+            continue
+        if class_rows.ndim == 1:
+            class_rows = class_rows.reshape(1, -1)
+        for row in class_rows:
+            if len(row) < 5:
+                continue
+            conf = float(row[4])
+            if conf < HAILO_CONF:
+                continue
+            box = _map_hailo_box_to_frame(row, frame_w, frame_h, scale, pad_x, pad_y)
+            if box is None:
+                continue
+            if class_name in face_label_set:
+                face_boxes.append(box)
+                continue
+            detections.append({
+                "label": class_name,
+                "class": class_name,
+                "conf": round(conf, 2),
+                "box": box,
+            })
+
+    return detections, face_boxes
+
+
+def _run_hailo(frame_rgb: np.ndarray) -> tuple[list[dict], list[list[float]]]:
+    hailo = _models["hailo"]
+    if hailo is None:
+        return [], []
+
+    prepared = _prepare_hailo_input(frame_rgb)
+    if prepared is None:
+        return [], []
+    hailo_input, scale, pad_x, pad_y = prepared
+
+    try:
+        outputs = hailo.run(hailo_input)
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.debug("detect: Hailo error — %s", exc)
+        return [], []
+
+    hailo_profile = _hailo_profile()
+    return _decode_hailo_outputs(
+        outputs,
+        frame_rgb.shape,
+        scale,
+        pad_x,
+        pad_y,
+        class_map=dict(hailo_profile["class_map"]),
+        face_labels=set(hailo_profile["face_labels"]),
+    )
+
+
 # ── per-frame inference ───────────────────────────────────────────────────────
 
-def _run(frame_rgb: np.ndarray) -> list[dict]:
+def _run_yolo(frame_rgb: np.ndarray, classes: list[int] | None = None) -> list[dict]:
     yolo = _models["yolo"]
     if yolo is None:
         return []
@@ -675,7 +976,7 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
         results = yolo.predict(
             frame_rgb,
             conf=DETECT_CONF,
-            classes=list(WATCH_CLASSES.keys()),
+            classes=classes if classes is not None else list(WATCH_CLASSES.keys()),
             verbose=False,
         )
         for r in results:
@@ -694,7 +995,23 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
                 })
     except (RuntimeError, ValueError, OSError) as exc:
         logger.debug("detect: YOLO error — %s", exc)
-        return dets
+    return dets
+
+
+def _run(frame_rgb: np.ndarray) -> list[dict]:
+    dets: list[dict] = []
+    face_boxes: list[list[float]] = []
+
+    if _models["hailo"] is not None:
+        hailo_dets, face_boxes = _run_hailo(frame_rgb)
+        for det in hailo_dets:
+            det["face_visible"] = any(_face_matches_person(det["box"], face_box) for face_box in face_boxes)
+        dets.extend(hailo_dets)
+
+        if DETECT_MODE == "hailo-hybrid" and _models["yolo"] is not None:
+            dets.extend(_run_yolo(frame_rgb, classes=[15, 16]))
+    else:
+        dets = _run_yolo(frame_rgb)
 
     # ── pet labels / lightweight promoted-gallery matching ────────────────────────────
     for d in dets:
@@ -720,7 +1037,7 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     fr = _models["fr"]
     person_dets = [d for d in dets if d["class"] == "person"]
     for person_det in person_dets:
-        person_det["face_visible"] = None
+        person_det.setdefault("face_visible", None)
 
     if person_dets and fr is not None:
         with _lock:
@@ -786,6 +1103,7 @@ def _worker(get_frame_fn: Callable) -> None:
     # Load models inside the thread so Flask starts immediately (model download
     # happens in the background; detections appear once loading is done).
     _load_yolo()
+    _load_hailo()
     _load_faces()
     _load_pet_labels()
     _load_pet_identities()
@@ -862,6 +1180,7 @@ def get_status() -> dict:
             "known_face_counts": dict(_face_gallery_status.get("people_encoding_counts", {})),
             "known_face_samples": int(_face_gallery_status.get("people_encoding_count", 0)),
             "model": _latest.get("model", "none"),
+            "accelerator": _current_accelerator_status(),
             "candidate_collection": _candidate_collector.get_status(),
         }
 
@@ -957,14 +1276,20 @@ def remove_face(name: str) -> tuple[bool, str]:
 
 
 def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
-    """Enroll a face from the latest live frame using a bounding box crop."""
+    """Enroll a face from the latest live frame using a bounding box crop.
+
+    Tries progressively wider crops and the 'cnn' face-detection model
+    so that profile / side-facing views have a better chance of success.
+    """
     fr = _models["fr"]
     if fr is None:
+        logger.info("enroll: rejected '%s' — face_recognition not installed", name)
         return False, ("face_recognition not installed "
                        "— cannot enroll person from live frame")
 
     frame = _frame_state.get("latest_frame")
     if frame is None:
+        logger.info("enroll: rejected '%s' — no live frame available yet", name)
         return False, "no live frame available yet"
 
     safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()[:32]
@@ -977,38 +1302,77 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
         y1 = max(0, int(box[1] * h))
         x2 = min(w, int(box[2] * w))
         y2 = min(h, int(box[3] * h))
+        logger.info("enroll: '%s' box=[%.3f,%.3f,%.3f,%.3f] px=[%d,%d,%d,%d] frame=%dx%d",
+                    safe, box[0], box[1], box[2], box[3], x1, y1, x2, y2, w, h)
         if x2 <= x1 or y2 <= y1:
+            logger.info("enroll: rejected '%s' — invalid bounding box after pixel conversion", safe)
             return False, "invalid bounding box"
 
-        crop = _prepare_face_crop(frame[y1:y2, x1:x2])
-        if crop is None:
-            return False, "invalid bounding box"
+        # --- Try progressively wider crops with both HOG and CNN models ---
+        pad_levels = [
+            0,                                       # exact YOLO box
+            int(max(x2 - x1, y2 - y1) * 0.15),      # ~15 % expansion
+            int(max(x2 - x1, y2 - y1) * 0.35),      # ~35 % expansion
+            int(max(x2 - x1, y2 - y1) * 0.60),      # ~60 % — catches side profiles
+        ]
+        encs = []
+        used_cnn = False
+        for pad in pad_levels:
+            cy1 = max(0, y1 - pad)
+            cy2 = min(h, y2 + pad)
+            cx1 = max(0, x1 - pad)
+            cx2 = min(w, x2 + pad)
+            crop = _prepare_face_crop(frame[cy1:cy2, cx1:cx2])
+            if crop is None:
+                continue
+            # Default (HOG) first — fast and works for front faces
+            encs = fr.face_encodings(crop)
+            if encs:
+                logger.info("enroll: '%s' face found with default model at pad=%d", safe, pad)
+                break
+            # CNN fallback — slower but much better on profile / angled faces
+            locs = fr.face_locations(crop, model="cnn")
+            if locs:
+                encs = fr.face_encodings(crop, locs)
+                if encs:
+                    used_cnn = True
+                    logger.info("enroll: '%s' face found with cnn model at pad=%d", safe, pad)
+                    break
+            logger.debug("enroll: '%s' no face at pad=%d crop=%dx%d", safe, pad,
+                         crop.shape[1], crop.shape[0])
 
-        encs = fr.face_encodings(crop)
         if not encs:
-            expanded_crop = _prepare_face_crop(
-                frame[max(0, y1 - 20):min(h, y2 + 20),
-                      max(0, x1 - 20):min(w, x2 + 20)]
-            )
-            if expanded_crop is not None:
-                encs = fr.face_encodings(expanded_crop)
-        if not encs:
+            logger.warning("enroll: '%s' failed — no face detected after all crop expansions", safe)
             return False, ("no face detected in selected area "
                            "— try when the face is clearly visible")
+
+        # CNN-only detections are usually profile/angled faces whose
+        # encodings match poorly against the HOG-based live recognition.
+        # If the identity already has a known encoding, keep it instead
+        # of overwriting with a lower-quality profile encoding.
+        already_enrolled = safe in _known_names
+        if used_cnn and already_enrolled:
+            logger.info("enroll: '%s' already enrolled — skipping CNN-only "
+                        "update (profile encodings match poorly in live mode)", safe)
+            return True, (f"'{safe}' is already enrolled. Side/profile views "
+                          "can't improve the existing encoding — use a clear "
+                          "front-facing view to re-enroll.")
 
         os.makedirs(FACES_DIR, exist_ok=True)
         np.save(os.path.join(FACES_DIR, safe + ".npy"), encs[0])
 
         with _lock:
-            if safe in _known_names:
+            if already_enrolled:
                 _known_encs[_known_names.index(safe)] = encs[0]
             else:
                 _known_names.append(safe)
                 _known_encs.append(encs[0])
 
+        logger.info("enroll: '%s' enrolled successfully from live frame", safe)
         return True, f"Enrolled '{safe}' from live frame"
     except TypeError as exc:
-        logger.warning("detect: snapshot face encoding failed for '%s' — %s", safe, exc)
+        logger.warning("enroll: snapshot face encoding failed for '%s' — %s", safe, exc)
         return False, "face encoding failed for selected area — try again"
     except (OSError, ValueError, RuntimeError) as exc:
+        logger.warning("enroll: error for '%s' — %s", safe, exc)
         return False, str(exc)

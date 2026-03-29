@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+import numpy as np
+
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, JpegEncoder
 from picamera2.outputs import FileOutput
@@ -19,6 +21,18 @@ from .base import CameraBackend, normalize_rotation, sizes_for_rotation
 logger = logging.getLogger(__name__)
 LORES_PUBLISH_FPS = 15.0
 PI_PREVIEW_SOURCES = {"main", "lores"}
+
+
+def _normalize_lores_frame(frame):
+    if frame is None:
+        return None
+    if getattr(frame, "ndim", 0) == 3 and frame.shape[2] >= 3:
+        # Picamera2 lores RGB888 capture on the Pi backend is arriving with
+        # red/blue swapped in practice. Normalize to true RGB so face
+        # recognition, review-queue crops, and saved candidate images use the
+        # same colors users see in the live preview JPEG stream.
+        return np.ascontiguousarray(frame[..., [2, 1, 0]])
+    return frame
 
 
 def create_picamera(retries: int = 10, retry_delay: float = 1.0):
@@ -99,7 +113,7 @@ class PiCameraBackend(CameraBackend):
         if picam2 is None:
             return None
         with self._lores_capture_lock:
-            return picam2.capture_array("lores")
+            return _normalize_lores_frame(picam2.capture_array("lores"))
 
     def _lores_capture_loop(self) -> None:
         interval = 1.0 / LORES_PUBLISH_FPS
