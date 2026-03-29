@@ -1,0 +1,11 @@
+[Unit]
+Description=BunnyCam health watchdog
+After=network-online.target sec-cam.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ron/camera_site
+ExecStart=/home/ron/camera_site/.venv/bin/python /home/ron/camera_site/tools/sec_cam_watchdog.py
+EnvironmentFile=-/home/ron/camera_site/.env.local

@@ -172,6 +172,53 @@
     .identity-empty { font-size: 12px; opacity: 0.7; }
     .identity-status { margin-top: 6px; font-size: 11px; opacity: 0.8; line-height: 1.4; }
 
+    .zone-panel {
+      padding: 8px 12px;
+      background: #eefcf4; border: 2px solid #4a9f68; border-radius: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .zone-title { font-size: 13px; font-weight: 800; color: #1f5e38; }
+    .zone-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    .zone-controls button.active { background: #1f5e38; color: #fff; border-color: #1f5e38; }
+    .zone-status { font-size: 11px; color: #24543a; line-height: 1.45; }
+
+    .pen-events-panel {
+      padding: 8px 12px;
+      background: #fff8ec; border: 2px solid #d39a35; border-radius: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .pen-events-title { font-size: 13px; font-weight: 800; color: #7f5413; }
+    .pen-events-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+    .pen-event-item {
+      display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
+      padding: 6px 8px; border-radius: 8px; background: #fff; border: 1px solid #ebc57f;
+      font-size: 12px; color: #5b3e10;
+    }
+    .pen-event-item.enter { border-left: 4px solid #d32f2f; }
+    .pen-event-item.exit { border-left: 4px solid #1976D2; }
+    .pen-event-item.stop { border-left: 4px solid #f57c00; }
+    .pen-event-item.pass { border-left: 4px solid #607d8b; }
+    .pen-event-time { font-size: 11px; opacity: 0.7; white-space: nowrap; }
+    .pen-event-empty { font-size: 12px; opacity: 0.75; }
+
+    .move-events-panel {
+      padding: 8px 12px;
+      background: #f0f4ff; border: 2px solid #5c7cba; border-radius: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .move-events-title { font-size: 13px; font-weight: 800; color: #2c4a7c; }
+    .move-events-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+    .move-event-item {
+      display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
+      padding: 6px 8px; border-radius: 8px; background: #fff; border: 1px solid #b3c4e6;
+      font-size: 12px; color: #2c4a7c;
+    }
+    .move-event-item.person { border-left: 4px solid #2196F3; }
+    .move-event-item.dog { border-left: 4px solid #4CAF50; }
+    .move-event-item.cat { border-left: 4px solid #9C27B0; }
+    .move-event-item.unknown { border-left: 4px solid #9E9E9E; }
+    .move-event-empty { font-size: 12px; opacity: 0.75; }
+
     /* --- Enrollment modal --- */
     .enroll-modal-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -296,7 +343,7 @@
     <!-- ── Right column: panels ── -->
     <div class="panels-column">
       <div class="controls">
-        <button id="buzzBtn" type="button">Buzz: OFF</button>
+        <button id="buzzBtn" type="button">Buzz: ON</button>
         <button id="testBuzz" type="button">Test Buzz</button>
         <button id="calBtn" type="button">Calibrate</button>
         <select id="rotSel">
@@ -363,6 +410,32 @@
         <div id="identityStatus" class="identity-status hidden"></div>
       </div>
 
+      <div id="penZonesPanel" class="zone-panel">
+        <div class="zone-title">Pen Boundaries</div>
+        <div class="zone-controls">
+          <button id="markPenBtn" type="button">Mark Pen Box</button>
+          <button id="markGateBtn" type="button">Mark Gate Line</button>
+          <button id="clearPenBtn" type="button">Clear Pen</button>
+          <button id="clearGateBtn" type="button">Clear Gate</button>
+          <button id="showZonesBtn" type="button" class="active">Show Zones</button>
+        </div>
+        <div id="zoneStatus" class="zone-status">Set a pen box and a gate line to enable gate event tracking. Current detection model tracks people, dogs, and cats; bunny enter/exit events need rabbit detection support later.</div>
+      </div>
+
+      <div id="penEventsPanel" class="pen-events-panel">
+        <div class="pen-events-title">Pen Events</div>
+        <div id="penEventsList" class="pen-events-list">
+          <div class="pen-event-empty">No gate events yet.</div>
+        </div>
+      </div>
+
+      <div id="moveEventsPanel" class="move-events-panel">
+        <div class="move-events-title">Movement Events</div>
+        <div id="moveEventsList" class="move-events-list">
+          <div class="move-event-empty">No movement events yet.</div>
+        </div>
+      </div>
+
       <div id="meta" class="meta"></div>
     </div>
   </div>
@@ -387,13 +460,45 @@
   };
 })();
 
-let buzzEnabled = false;
+let buzzEnabled = true;
 let prevMotion = false;
 let lastBuzzMs = 0;
+let lastDogSirenMs = 0;
+let prevIdentifiedDogKey = '';
 const BUZZ_COOLDOWN_MS = 900;
+const DOG_SIREN_COOLDOWN_MS = 4000;
+const PEN_EVENT_LIMIT = 16;
+const GATE_NEAR_DISTANCE = 0.15;
+const GATE_STOP_DISTANCE = 0.04;
+const GATE_STOP_DWELL_MS = 1600;
+const GATE_STOP_MOVE_THRESHOLD = 0.009;
+const TRACK_FORGET_MS = 5000;
+const UNKNOWN_DOG_OBSERVE_MS = 2000;
+const EVENT_COOLDOWN_MS = Object.freeze({
+  stops_at_gate: 5000,
+  passes_by_gate: 5000,
+  enters_gate: 8000,
+  exits_gate: 8000,
+});
 
 let roiNorm = null;
+let penZoneNorm = null;
+let gateLineNorm = null;
 let focusTargetNorm = null;
+let drawMode = 'roi';
+let eventSequence = 0;
+let penEventItems = [];
+const penTrackState = new Map();
+const penEventCooldowns = new Map();
+const CROSSING_CONFIRM_FRAMES = 3;
+const LINE_ON_TOLERANCE = 0.012;
+const MOVE_EVENT_LIMIT = 20;
+const MOVE_EVENT_COOLDOWN_MS = 3000;
+let moveEventItems = [];
+const moveEventCooldowns = new Map();
+const moveTrackState = new Map();
+const MOVE_TRACK_FORGET_MS = 4000;
+const MOVE_DIRECTION_MIN_DX = 0.04;
 
 const tabLive = document.getElementById('tabLive');
 const tabPlay = document.getElementById('tabPlay');
@@ -415,10 +520,19 @@ const thrVal = document.getElementById('thrVal');
 const minpx = document.getElementById('minpx');
 const minpxVal = document.getElementById('minpxVal');
 const rotSel = document.getElementById('rotSel');
+const markPenBtn = document.getElementById('markPenBtn');
+const markGateBtn = document.getElementById('markGateBtn');
+const clearPenBtn = document.getElementById('clearPenBtn');
+const clearGateBtn = document.getElementById('clearGateBtn');
+const showZonesBtn = document.getElementById('showZonesBtn');
+const zoneStatus = document.getElementById('zoneStatus');
+let showZones = true;
 
 const dvr = document.getElementById('dvr');
 const dvrLabel = document.getElementById('dvrLabel');
 const player = document.getElementById('player');
+const penEventsList = document.getElementById('penEventsList');
+const moveEventsList = document.getElementById('moveEventsList');
 
 let dvrSegments = []; // oldest -> newest
 let dvrTotal = 0;
@@ -466,14 +580,451 @@ function unlockAudioTiny() {
 
 function buzz() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const o = ctx.createOscillator();
-  const g = ctx.createGain();
-  o.type = 'square';
-  o.frequency.value = 150;
-  g.gain.value = 0.09;
-  o.connect(g); g.connect(ctx.destination);
-  o.start();
-  setTimeout(() => { o.stop(); ctx.close(); }, 220);
+  const compressor = ctx.createDynamicsCompressor();
+  const master = ctx.createGain();
+  const now = ctx.currentTime;
+  const durationSec = 0.18;
+
+  compressor.threshold.value = -24;
+  compressor.knee.value = 20;
+  compressor.ratio.value = 12;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.15;
+
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+  master.connect(compressor);
+  compressor.connect(ctx.destination);
+
+  const carrier = ctx.createOscillator();
+  carrier.type = 'square';
+  carrier.frequency.setValueAtTime(1850, now);
+  carrier.frequency.exponentialRampToValueAtTime(1650, now + durationSec);
+  carrier.connect(master);
+
+  const overtone = ctx.createOscillator();
+  overtone.type = 'triangle';
+  overtone.frequency.setValueAtTime(2400, now);
+  overtone.frequency.exponentialRampToValueAtTime(2100, now + durationSec);
+  overtone.connect(master);
+
+  carrier.start(now);
+  overtone.start(now);
+  carrier.stop(now + durationSec);
+  overtone.stop(now + durationSec);
+  setTimeout(() => { ctx.close(); }, Math.ceil((durationSec + 0.08) * 1000));
+}
+
+function dogAlertProfile(detections) {
+  const alertDogs = (detections || []).filter(d => {
+    if (detDisplayClass(d) !== 'dog') return false;
+    const label = detDisplayLabel(d).trim().toLowerCase();
+    return label !== 'pumpkin';
+  });
+
+  const dogKey = alertDogs
+    .map(d => `${d.track_id ?? d.box.join(',')}:${detDisplayLabel(d)}`)
+    .sort()
+    .join('|');
+
+  const identifiedDogKey = alertDogs
+    .filter(d => detDisplayLabel(d).trim().toLowerCase() !== 'dog')
+    .map(d => `${d.track_id ?? d.box.join(',')}:${detDisplayLabel(d)}`)
+    .sort()
+    .join('|');
+
+  return { dogKey, identifiedDogKey };
+}
+
+function hasGateTrackingGeometry() {
+  return Array.isArray(penZoneNorm) && penZoneNorm.length === 4 && Array.isArray(gateLineNorm) && gateLineNorm.length === 4;
+}
+
+function setDrawMode(mode) {
+  drawMode = mode;
+  markPenBtn.classList.toggle('active', mode === 'pen');
+  markGateBtn.classList.toggle('active', mode === 'gate');
+  updateZoneStatus();
+}
+
+function updateZoneStatus() {
+  const penReady = Array.isArray(penZoneNorm) && penZoneNorm.length === 4;
+  const gateReady = Array.isArray(gateLineNorm) && gateLineNorm.length === 4;
+  if (drawMode === 'pen') {
+    zoneStatus.textContent = 'Drag a rectangle over the bunny pen, then release to save the pen box.';
+    return;
+  }
+  if (drawMode === 'gate') {
+    zoneStatus.textContent = 'Drag a line across the pen opening to mark the gate threshold.';
+    return;
+  }
+  if (penReady && gateReady) {
+    zoneStatus.textContent = 'Gate tracking armed. Short beep: dog stops at gate. Long siren: dog enters through the threshold.';
+    return;
+  }
+  if (penReady) {
+    zoneStatus.textContent = 'Pen box saved. Mark the gate line to enable pass-by, stop, and enter events.';
+    return;
+  }
+  if (gateReady) {
+    zoneStatus.textContent = 'Gate line saved. Mark the pen box so the app can tell when a dog enters the pen.';
+    return;
+  }
+  zoneStatus.textContent = 'Set a pen box and a gate line to enable gate event tracking. Current detection model tracks people, dogs, and cats; bunny enter/exit events need rabbit detection support later.';
+}
+
+function pointInRect(point, rect) {
+  if (!rect) return false;
+  return point.x >= rect[0] && point.x <= rect[2] && point.y >= rect[1] && point.y <= rect[3];
+}
+
+function distancePointToSegment(point, line) {
+  if (!line) return Number.POSITIVE_INFINITY;
+  const [x1, y1, x2, y2] = line;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = (dx * dx) + (dy * dy);
+  if (lenSq <= 1e-6) return Math.hypot(point.x - x1, point.y - y1);
+  const t = Math.max(0, Math.min(1, (((point.x - x1) * dx) + ((point.y - y1) * dy)) / lenSq));
+  const px = x1 + (t * dx);
+  const py = y1 + (t * dy);
+  return Math.hypot(point.x - px, point.y - py);
+}
+
+function eventSubjectLabel(det) {
+  const cls = detDisplayClass(det);
+  const label = detDisplayLabel(det).trim();
+  const lower = label.toLowerCase();
+  if (cls === 'person') return lower === 'person' ? 'Unknown person' : label;
+  if (cls === 'dog') return lower === 'dog' ? 'Unknown animal' : label;
+  if (cls === 'cat') return lower === 'cat' ? 'Unknown animal' : label;
+  return label || 'Unknown';
+}
+
+function sideOfGateLine(point) {
+  if (!gateLineNorm) return 0;
+  const [x1, y1, x2, y2] = gateLineNorm;
+  return (x2 - x1) * (point.y - y1) - (y2 - y1) * (point.x - x1);
+}
+
+function penSideSign() {
+  if (!penZoneNorm || !gateLineNorm) return 1;
+  const pc = { x: (penZoneNorm[0] + penZoneNorm[2]) / 2, y: (penZoneNorm[1] + penZoneNorm[3]) / 2 };
+  return Math.sign(sideOfGateLine(pc)) || 1;
+}
+
+function resetPenEventTracking() {
+  penTrackState.clear();
+}
+
+function renderPenEvents() {
+  if (!penEventItems.length) {
+    penEventsList.innerHTML = '<div class="pen-event-empty">No gate events yet.</div>';
+    return;
+  }
+  penEventsList.innerHTML = penEventItems.map((item) => {
+    const stamp = new Date(item.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    const klass = item.kind === 'enters_gate' ? 'enter' : item.kind === 'exits_gate' ? 'exit' : item.kind === 'stops_at_gate' ? 'stop' : 'pass';
+    return `<div class="pen-event-item ${klass}"><span>${esc(item.text)}</span><span class="pen-event-time">${stamp}</span></div>`;
+  }).join('');
+}
+
+function addPenEvent(kind, subject, trackKey, now, extra) {
+  const cooldownKey = `${kind}:${trackKey}`;
+  const lastMs = penEventCooldowns.get(cooldownKey) || 0;
+  if ((now - lastMs) < (EVENT_COOLDOWN_MS[kind] || 4000)) {
+    return null;
+  }
+  penEventCooldowns.set(cooldownKey, now);
+  const suffix = extra || '';
+  const text = kind === 'enters_gate'
+    ? `${subject} enters gate`
+    : kind === 'exits_gate'
+      ? `${subject} exits gate${suffix}`
+      : kind === 'stops_at_gate'
+        ? `${subject} stops at gate`
+        : `${subject} passes by gate${suffix}`;
+  const item = { id: ++eventSequence, kind, text, ts: now, cls: subject ? subject.toLowerCase() : 'unknown' };
+  penEventItems.unshift(item);
+  penEventItems = penEventItems.slice(0, PEN_EVENT_LIMIT);
+  renderPenEvents();
+  return item;
+}
+
+function processPenEvents(detections) {
+  if (!hasGateTrackingGeometry()) {
+    resetPenEventTracking();
+    return [];
+  }
+
+  const now = Date.now();
+  const created = [];
+  const seenKeys = new Set();
+  const insideSign = penSideSign();
+
+  (detections || []).forEach((det) => {
+    const cls = detDisplayClass(det);
+    if (cls !== 'dog' && cls !== 'person' && cls !== 'cat') return;
+
+    const key = String(det.track_id ?? det.box.join(','));
+    seenKeys.add(key);
+    const center = { x: (det.box[0] + det.box[2]) / 2, y: (det.box[1] + det.box[3]) / 2 };
+    const gateDistance = distancePointToSegment(center, gateLineNorm);
+    const nearGate = gateDistance <= GATE_NEAR_DISTANCE;
+    const rawSide = sideOfGateLine(center);
+    const onLine = gateDistance < LINE_ON_TOLERANCE;
+    // 1 = pen (inside), -1 = outside, 0 = ambiguous (on/near line)
+    const currentSide = onLine ? 0 : (Math.sign(rawSide) === insideSign ? 1 : -1);
+    const subject = eventSubjectLabel(det);
+    const existing = penTrackState.get(key) || {
+      confirmedSide: -1,             // always assume outside; real crossings are confirmed by sustained history
+      sideHistory: [],
+      gateVisitActive: false,
+      gateVisitStartCenter: null,
+      stopEmitted: false,
+      lastCenter: null,
+      lastMoveAt: now,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+
+    // Track movement for dwell detection
+    if (existing.lastCenter) {
+      const movement = Math.hypot(center.x - existing.lastCenter.x, center.y - existing.lastCenter.y);
+      if (movement > GATE_STOP_MOVE_THRESHOLD) {
+        existing.lastMoveAt = now;
+      }
+    } else {
+      existing.lastMoveAt = now;
+    }
+
+    // Maintain side history (keep last 6 frames)
+    existing.sideHistory.push(currentSide);
+    if (existing.sideHistory.length > 6) existing.sideHistory.shift();
+
+    // Gate visit tracking
+    if (nearGate && !existing.gateVisitActive) {
+      existing.gateVisitActive = true;
+      existing.gateVisitStartCenter = { x: center.x, y: center.y };
+      existing.stopEmitted = false;
+    }
+
+    // Stop-at-gate: lingering near the line on the outside
+    const stopEligible = gateDistance <= GATE_STOP_DISTANCE && currentSide !== 1;
+    if (existing.gateVisitActive && stopEligible && !existing.stopEmitted && (now - existing.lastMoveAt) >= GATE_STOP_DWELL_MS) {
+      const event = addPenEvent('stops_at_gate', subject, key, now);
+      if (event) created.push(event);
+      existing.stopEmitted = true;
+    }
+
+    // Crossing: require CROSSING_CONFIRM_FRAMES consecutive non-zero
+    // frames on the same side before confirming a side transition.
+    // This prevents a dog or person walking in front of the gate line
+    // from triggering a false crossing — brief occlusion (1-2 frames)
+    // is ignored because the side history won't sustain.
+    const recent = existing.sideHistory.slice(-CROSSING_CONFIRM_FRAMES);
+    if (recent.length >= CROSSING_CONFIRM_FRAMES && recent.every(s => s !== 0 && s === recent[0])) {
+      const newSide = recent[0];
+      if (newSide !== existing.confirmedSide) {
+        if (newSide === 1 && existing.confirmedSide === -1) {
+          // Confirmed crossing from outside → inside pen
+          const event = addPenEvent('enters_gate', subject, key, now);
+          if (event) created.push(event);
+        } else if (newSide === -1 && existing.confirmedSide === 1) {
+          // Confirmed crossing from inside pen → outside
+          const event = addPenEvent('exits_gate', subject, key, now);
+          if (event) created.push(event);
+          // Re-arm gate visit so directional pass-by fires when they walk away
+          existing.gateVisitActive = true;
+          existing.gateVisitStartCenter = { x: center.x, y: center.y };
+          existing.stopEmitted = false;
+        }
+        existing.confirmedSide = newSide;
+        if (newSide === 1) {
+          existing.gateVisitActive = false;
+          existing.stopEmitted = false;
+        }
+      }
+    }
+
+    // Pass-by: was near gate, moved away, still on outside — include direction
+    if (existing.gateVisitActive && !nearGate && currentSide === -1) {
+      let direction = '';
+      const ref = existing.gateVisitStartCenter;
+      if (ref) {
+        const dx = center.x - ref.x;
+        if (Math.abs(dx) > 0.01) {
+          direction = dx > 0 ? ' to living room' : ' to kitchen';
+        }
+      }
+      const event = addPenEvent('passes_by_gate', subject, key, now, direction);
+      if (event) created.push(event);
+      existing.gateVisitActive = false;
+      existing.stopEmitted = false;
+    }
+
+    existing.lastCenter = center;
+    existing.lastSeenAt = now;
+    penTrackState.set(key, existing);
+  });
+
+  for (const [key, state] of penTrackState.entries()) {
+    if (seenKeys.has(key)) continue;
+    if ((now - state.lastSeenAt) > TRACK_FORGET_MS) {
+      penTrackState.delete(key);
+    }
+  }
+
+  return created;
+}
+
+function renderMovementEvents() {
+  if (!moveEventItems.length) {
+    moveEventsList.innerHTML = '<div class="move-event-empty">No movement events yet.</div>';
+    return;
+  }
+  moveEventsList.innerHTML = moveEventItems.map((item) => {
+    const stamp = new Date(item.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    const klass = item.cls || 'unknown';
+    return `<div class="move-event-item ${klass}"><span>${esc(item.text)}</span><span class="pen-event-time">${stamp}</span></div>`;
+  }).join('');
+}
+
+function addMovementEvent(text, cls, now) {
+  const cooldownKey = `${cls}:${text}`;
+  const lastMs = moveEventCooldowns.get(cooldownKey) || 0;
+  if ((now - lastMs) < MOVE_EVENT_COOLDOWN_MS) return null;
+  moveEventCooldowns.set(cooldownKey, now);
+  const item = { id: ++eventSequence, text, cls, ts: now };
+  moveEventItems.unshift(item);
+  moveEventItems = moveEventItems.slice(0, MOVE_EVENT_LIMIT);
+  renderMovementEvents();
+  return item;
+}
+
+function processMovementEvents(status, detections) {
+  const now = Date.now();
+  const hasDetections = detections && detections.length > 0;
+  const seenMoveKeys = new Set();
+  (detections || []).forEach((det) => {
+    const cls = detDisplayClass(det);
+    const label = detDisplayLabel(det).trim();
+    const lower = label.toLowerCase();
+    const key = String(det.track_id ?? det.box.join(','));
+    seenMoveKeys.add(key);
+    const center = { x: (det.box[0] + det.box[2]) / 2, y: (det.box[1] + det.box[3]) / 2 };
+
+    let name;
+    if (cls === 'person') {
+      name = lower === 'person' ? 'Unknown person' : label;
+    } else if (cls === 'dog') {
+      name = lower === 'dog' ? 'Unknown animal' : label;
+    } else if (cls === 'cat') {
+      name = lower === 'cat' ? 'Unknown animal' : label;
+    } else {
+      return;
+    }
+
+    let mt = moveTrackState.get(key);
+    if (!mt) {
+      mt = { firstCenter: { x: center.x, y: center.y }, lastCenter: center,
+             directionLogged: false, enteredPen: false,
+             lastSeenAt: now, name, cls };
+      moveTrackState.set(key, mt);
+    }
+    mt.lastSeenAt = now;
+    mt.lastCenter = { x: center.x, y: center.y };
+    mt.name = name;
+    mt.cls = cls;
+
+    // Flag if this track has entered the pen (pen events handle it)
+    const penState = penTrackState.get(key);
+    if (penState && penState.confirmedSide === 1) {
+      mt.enteredPen = true;
+    }
+
+    // Emit one direction event when displacement is large enough
+    // Skip if track entered the pen (pen events cover it)
+    if (!mt.directionLogged && !mt.enteredPen) {
+      const dx = center.x - mt.firstCenter.x;
+      if (Math.abs(dx) >= MOVE_DIRECTION_MIN_DX) {
+        const dir = dx > 0 ? 'to living room' : 'to kitchen';
+        addMovementEvent(`${name} heading ${dir}`, cls, now);
+        mt.directionLogged = true;
+      }
+    }
+  });
+  // Expire old movement tracks — emit deferred event on departure
+  for (const [key, mt] of moveTrackState.entries()) {
+    if (seenMoveKeys.has(key)) continue;
+    if ((now - mt.lastSeenAt) > MOVE_TRACK_FORGET_MS) {
+      // If direction was never logged and track didn't enter the pen,
+      // emit a single consolidated event now that they've left
+      if (!mt.enteredPen && !mt.directionLogged) {
+        const dx = mt.lastCenter ? (mt.lastCenter.x - mt.firstCenter.x) : 0;
+        if (Math.abs(dx) >= MOVE_DIRECTION_MIN_DX) {
+          const dir = dx > 0 ? 'to living room' : 'to kitchen';
+          addMovementEvent(`${mt.name} heading ${dir}`, mt.cls, mt.lastSeenAt);
+        } else {
+          addMovementEvent(`${mt.name} detected`, mt.cls, mt.lastSeenAt);
+        }
+      }
+      moveTrackState.delete(key);
+    }
+  }
+  if (status.motion && !hasDetections) {
+    addMovementEvent('Unknown movement detected', 'unknown', now);
+  }
+}
+
+function dogSiren() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const compressor = ctx.createDynamicsCompressor();
+  const master = ctx.createGain();
+  const now = ctx.currentTime;
+  const durationSec = 1.6;
+
+  compressor.threshold.value = -28;
+  compressor.knee.value = 24;
+  compressor.ratio.value = 10;
+  compressor.attack.value = 0.004;
+  compressor.release.value = 0.18;
+
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.18, now + 0.04);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+  master.connect(compressor);
+  compressor.connect(ctx.destination);
+
+  const carrier = ctx.createOscillator();
+  carrier.type = 'sawtooth';
+  carrier.frequency.setValueAtTime(720, now);
+
+  const support = ctx.createOscillator();
+  support.type = 'triangle';
+  support.frequency.setValueAtTime(360, now);
+
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.setValueAtTime(1.35, now);
+
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.setValueAtTime(280, now);
+
+  lfo.connect(lfoGain);
+  lfoGain.connect(carrier.frequency);
+  lfoGain.connect(support.frequency);
+  carrier.connect(master);
+  support.connect(master);
+
+  carrier.start(now);
+  support.start(now);
+  lfo.start(now);
+  carrier.stop(now + durationSec);
+  support.stop(now + durationSec);
+  lfo.stop(now + durationSec);
+  setTimeout(() => { ctx.close(); }, Math.ceil((durationSec + 0.08) * 1000));
 }
 
 async function postJSON(url, body) {
@@ -811,8 +1362,38 @@ function drawRoi(norm) {
 let dragging = false;
 let pointerActive = false;
 let startX = 0, startY = 0;
+let gateDraftNorm = null;
 const TAP_DRAG_THRESHOLD = 0.01;
 function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+
+async function saveEventZones(payload) {
+  const response = await postJSON('/set_event_zones', payload);
+  if (Object.prototype.hasOwnProperty.call(response, 'pen_zone_norm')) {
+    penZoneNorm = response.pen_zone_norm;
+  }
+  if (Object.prototype.hasOwnProperty.call(response, 'gate_line_norm')) {
+    gateLineNorm = response.gate_line_norm;
+  }
+  resetPenEventTracking();
+  updateZoneStatus();
+  drawDetections(lastDetections);
+}
+
+markPenBtn.addEventListener('click', () => setDrawMode(drawMode === 'pen' ? 'roi' : 'pen'));
+markGateBtn.addEventListener('click', () => setDrawMode(drawMode === 'gate' ? 'roi' : 'gate'));
+clearPenBtn.addEventListener('click', async () => {
+  await saveEventZones({ pen_zone_norm: null });
+  showToast('Pen box cleared.', 'info', 2500);
+});
+clearGateBtn.addEventListener('click', async () => {
+  await saveEventZones({ gate_line_norm: null });
+  showToast('Gate line cleared.', 'info', 2500);
+});
+showZonesBtn.addEventListener('click', () => {
+  showZones = !showZones;
+  showZonesBtn.classList.toggle('active', showZones);
+  drawDetections(lastDetections);
+});
 
 wrap.addEventListener('pointerdown', (e) => {
   // only in live mode
@@ -830,19 +1411,54 @@ wrap.addEventListener('pointermove', (e) => {
   const r = wrap.getBoundingClientRect();
   const x = clamp01((e.clientX - r.left) / r.width);
   const y = clamp01((e.clientY - r.top) / r.height);
+  if (drawMode === 'gate') {
+    dragging = true;
+    gateDraftNorm = [startX, startY, x, y];
+    gateLineNorm = gateDraftNorm;
+    drawDetections(lastDetections);
+    return;
+  }
     if (!dragging && (Math.abs(x - startX) >= TAP_DRAG_THRESHOLD || Math.abs(y - startY) >= TAP_DRAG_THRESHOLD)) {
         dragging = true;
-        roiNorm = [startX, startY, startX, startY];
+    if (drawMode === 'pen') {
+      penZoneNorm = [startX, startY, startX, startY];
+    } else {
+      roiNorm = [startX, startY, startX, startY];
+    }
     }
     if (!dragging) return;
+  if (drawMode === 'pen') {
+  penZoneNorm = [Math.min(startX,x), Math.min(startY,y), Math.max(startX,x), Math.max(startY,y)];
+  drawDetections(lastDetections);
+  } else {
   roiNorm = [Math.min(startX,x), Math.min(startY,y), Math.max(startX,x), Math.max(startY,y)];
   drawRoi(roiNorm);
+  }
 });
 
 wrap.addEventListener('pointerup', async () => {
     if (!pointerActive) return;
     pointerActive = false;
+  if (drawMode === 'gate') {
+    const line = gateLineNorm;
+    gateDraftNorm = null;
+    dragging = false;
+    if (!line || Math.hypot(line[2] - line[0], line[3] - line[1]) < 0.03) {
+      gateLineNorm = null;
+      drawDetections(lastDetections);
+      setDrawMode('roi');
+      return;
+    }
+    await saveEventZones({ gate_line_norm: line });
+    showToast('Gate line saved.', 'success', 2500);
+    setDrawMode('roi');
+    return;
+  }
     if (!dragging) {
+    if (drawMode === 'pen') {
+      setDrawMode('roi');
+      return;
+    }
         // Check if tap landed on a detection box
         const hitIdx = hitTestDetection(startX, startY);
         if (hitIdx >= 0) {
@@ -855,14 +1471,27 @@ wrap.addEventListener('pointerup', async () => {
         return;
     }
     dragging = false;
-  const w = roiNorm[2] - roiNorm[0];
-  const h = roiNorm[3] - roiNorm[1];
+  const targetNorm = drawMode === 'pen' ? penZoneNorm : roiNorm;
+  const w = targetNorm[2] - targetNorm[0];
+  const h = targetNorm[3] - targetNorm[1];
     if (w < 0.02 || h < 0.02) {
+        if (drawMode === 'pen') {
+            penZoneNorm = null;
+            drawDetections(lastDetections);
+            setDrawMode('roi');
+            return;
+        }
         roiNorm = null;
         roiBox.style.display = 'none';
         await focusAt(startX, startY);
         return;
     }
+  if (drawMode === 'pen') {
+    await saveEventZones({ pen_zone_norm: penZoneNorm });
+    showToast('Pen box saved.', 'success', 2500);
+    setDrawMode('roi');
+    return;
+  }
   await postJSON('/set_roi', { roi_norm: roiNorm });
   await postJSON('/calibrate', {});
 });
@@ -951,6 +1580,12 @@ async function pollLiveState({ signal } = {}) {
   const j = await fetchJSON('/api/live-state', { signal });
   const s = j.status;
   const d = j.detect;
+  const dogProfile = dogAlertProfile(d.detections);
+  const dogKey = dogProfile.dogKey;
+  const namedDogKey = dogProfile.identifiedDogKey;
+  const penEvents = processPenEvents(d.detections);
+  processMovementEvents(s, d.detections);
+  const gateTrackingReady = hasGateTrackingGeometry();
 
   // ── Status update ──
   const top = document.getElementById('top');
@@ -973,10 +1608,69 @@ async function pollLiveState({ signal } = {}) {
     ' | Instant: ' + s.suspect_threshold;
 
   const now = Date.now();
-  if (buzzEnabled && s.motion && !prevMotion && (now - lastBuzzMs) > BUZZ_COOLDOWN_MS) {
-    buzz();
-    lastBuzzMs = now;
+  if (buzzEnabled) {
+    const canPlayDogSiren = (now - lastDogSirenMs) > DOG_SIREN_COOLDOWN_MS;
+    const canPlayBuzz = (now - lastBuzzMs) > BUZZ_COOLDOWN_MS;
+
+    // Filter pen events to only the ones that should cause audio:
+    // - person / cat / pumpkin: always silent
+    // - named non-Pumpkin dog (e.g. Dobby): immediate alert
+    // - unknown "dog": alert only after UNKNOWN_DOG_OBSERVE_MS observation
+    const alertableEvents = penEvents.filter(ev => {
+      const lbl = (ev.cls || '').toLowerCase();
+      if (lbl === 'pumpkin' || lbl === 'person' || lbl === 'cat' || lbl === 'ron') return false;
+      if (lbl === 'dog') {
+        // unknown dog: check if this track has been observed long enough
+        // The track key is embedded in the cooldown key after the colon
+        // We use penTrackState to check first-seen time
+        return false; // handled separately below
+      }
+      return true; // named non-Pumpkin dog
+    });
+
+    // Check for unknown dogs that have been observed >= 2 seconds
+    const unknownDogAlertEvents = penEvents.filter(ev => {
+      if ((ev.cls || '').toLowerCase() !== 'dog') return false;
+      return true;
+    }).filter(ev => {
+      // Find the track entry to check observation duration
+      for (const [, tstate] of penTrackState.entries()) {
+        if (tstate.lastSeenAt && (now - (tstate.firstSeenAt || tstate.lastSeenAt)) >= UNKNOWN_DOG_OBSERVE_MS) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (gateTrackingReady) {
+      const namedEntered = alertableEvents.some(x => x.kind === 'enters_gate');
+      const namedStopped = alertableEvents.some(x => x.kind === 'stops_at_gate');
+      const unknownEntered = unknownDogAlertEvents.some(x => x.kind === 'enters_gate');
+      const unknownStopped = unknownDogAlertEvents.some(x => x.kind === 'stops_at_gate');
+      if ((namedEntered || unknownEntered) && canPlayDogSiren) {
+        dogSiren();
+        lastDogSirenMs = now;
+      } else if ((namedStopped || unknownStopped) && canPlayBuzz) {
+        buzz();
+        lastBuzzMs = now;
+      }
+    } else {
+      const dogJustIdentified = !!namedDogKey && namedDogKey !== prevIdentifiedDogKey;
+      if (dogJustIdentified && canPlayDogSiren) {
+        dogSiren();
+        lastDogSirenMs = now;
+      } else if (s.motion && !prevMotion) {
+        if (namedDogKey && canPlayDogSiren) {
+          dogSiren();
+          lastDogSirenMs = now;
+        } else if (dogKey && canPlayBuzz) {
+          buzz();
+          lastBuzzMs = now;
+        }
+      }
+    }
   }
+  prevIdentifiedDogKey = namedDogKey;
   prevMotion = !!s.motion;
 
   // ── Detection overlay update (skip when not in live mode) ──
@@ -996,7 +1690,12 @@ async function loadConfig(){
     resetFocusBtn.disabled = !c.focus_supported;
   setSliderText();
   roiNorm = c.roi_norm;
+  penZoneNorm = c.pen_zone_norm;
+  gateLineNorm = c.gate_line_norm;
   drawRoi(roiNorm);
+  updateZoneStatus();
+  renderPenEvents();
+  renderMovementEvents();
     if (!c.focus_supported) {
         setFocusStatus('click focus unavailable on this camera', 'error');
     } else if (c.lens_pos_max != null) {
@@ -1062,11 +1761,46 @@ function refreshLiveOverlayLayout(force = false) {
   }
 }
 
+function drawPenZone(ctx, norm, w, h) {
+  if (!norm) return;
+  const [x1, y1, x2, y2] = norm;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(74, 159, 104, 0.95)';
+  ctx.lineWidth = 2;
+  ctx.fillStyle = 'rgba(74, 159, 104, 0.12)';
+  ctx.strokeRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
+  ctx.fillRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
+  ctx.restore();
+}
+
+function drawGateLine(ctx, line, w, h) {
+  if (!line) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(211, 47, 47, 0.95)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 8]);
+  ctx.beginPath();
+  ctx.moveTo(line[0] * w, line[1] * h);
+  ctx.lineTo(line[2] * w, line[3] * h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(211, 47, 47, 0.95)';
+  ctx.beginPath();
+  ctx.arc(line[0] * w, line[1] * h, 4, 0, Math.PI * 2);
+  ctx.arc(line[2] * w, line[3] * h, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawDetections(dets) {
   if (!syncDetectCanvasSize()) return;
   const w = detectCanvas.width;
   const h = detectCanvas.height;
   detectCtx.clearRect(0, 0, w, h);
+  if (showZones) {
+    drawPenZone(detectCtx, penZoneNorm, w, h);
+    drawGateLine(detectCtx, gateLineNorm, w, h);
+  }
   detectCtx.font = 'bold 13px sans-serif';
   let selectedDrawn = false;
   for (let i = 0; i < dets.length; i++) {
@@ -1433,6 +2167,10 @@ function syncPolling({ immediateFamilies = [] } = {}) {
 function requestIdentityRefresh() {
   pollers.identities.refresh(true);
 }
+
+setDrawMode('roi');
+renderPenEvents();
+renderMovementEvents();
 
 document.addEventListener('visibilitychange', () => {
   pageVisible = document.visibilityState !== 'hidden';

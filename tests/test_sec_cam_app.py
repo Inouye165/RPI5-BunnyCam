@@ -81,6 +81,9 @@ def test_sec_cam_import_with_laptop_backend_does_not_require_picamera(monkeypatc
 
 def test_config_route_smoke_uses_injected_backend(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    # Clear any zones loaded from the persisted data/event_zones.json
+    module.cfg["pen_zone_norm"] = None
+    module.cfg["gate_line_norm"] = None
     monkeypatch.setattr(module, "_detect", types.SimpleNamespace(
         get_status=lambda: {
             "detection_enabled": False,
@@ -103,6 +106,8 @@ def test_config_route_smoke_uses_injected_backend(monkeypatch):
     assert payload["detection_reason"] == "ultralytics missing"
     assert payload["focus_supported"] is False
     assert payload["transform_supported"] is True
+    assert payload["pen_zone_norm"] is None
+    assert payload["gate_line_norm"] is None
 
 
 def test_detections_route_reports_disabled_reason(monkeypatch):
@@ -333,6 +338,8 @@ def test_main_page_includes_live_enroll_selection_persistence_guards(monkeypatch
     assert b"display_label || d.label || d.class" in response.data
     assert b"id=\"detectModel\"" in response.data
     assert b"minmax(480px, 1.35fr) minmax(320px, 0.75fr)" in response.data
+    assert b"id=\"penEventsPanel\"" in response.data
+    assert b"id=\"markGateBtn\"" in response.data
 
 
 def test_review_candidates_list_route(monkeypatch):
@@ -975,6 +982,28 @@ def test_config_includes_identity_labeling_in_detection_payload(monkeypatch):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["identity_labeling_enabled"] is True
+
+
+def test_set_event_zones_updates_pen_box_and_gate_line(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/set_event_zones", json={
+        "pen_zone_norm": [0.8, 0.6, 0.2, 0.1],
+        "gate_line_norm": [0.1, 0.2, 0.6, 0.2],
+    })
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["pen_zone_norm"] == [0.2, 0.1, 0.8, 0.6]
+    assert payload["gate_line_norm"] == [0.1, 0.2, 0.6, 0.2]
+
+    config_response = client.get("/config")
+    config_payload = config_response.get_json()
+    assert config_payload["pen_zone_norm"] == [0.2, 0.1, 0.8, 0.6]
+    assert config_payload["gate_line_norm"] == [0.1, 0.2, 0.6, 0.2]
 
 
 def test_identity_enroll_person_uses_box_center_crop(monkeypatch):

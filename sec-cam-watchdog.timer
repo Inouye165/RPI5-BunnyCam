@@ -1,0 +1,12 @@
+[Unit]
+Description=Run BunnyCam health watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=sec-cam-watchdog.service
+
+[Install]
+WantedBy=timers.target
