@@ -128,8 +128,9 @@ def test_pi_backend_fresh_lores_capture_updates_cache(monkeypatch):
     fresh = np.ones((2, 2, 3), dtype=np.uint8)
     backend._picam2.frames = [fresh]
 
-    assert backend.capture_fresh_lores_array() is fresh
-    assert backend.capture_lores_array() is fresh
+    result = backend.capture_fresh_lores_array()
+    assert np.array_equal(result, fresh[:, :, ::-1])
+    assert np.array_equal(backend.capture_lores_array(), result)
     assert backend._picam2.capture_count == 1
 
 

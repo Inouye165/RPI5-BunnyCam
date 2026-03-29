@@ -191,6 +191,26 @@
     .enroll-modal .btn-cancel { background: #fff; }
     .enroll-modal .det-preview { font-size: 13px; color: #555; margin-bottom: 4px; }
 
+    /* --- Toast notification (non-blocking) --- */
+    .toast-container {
+      position: fixed; top: 16px; right: 16px; z-index: 10001;
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto;
+      padding: 12px 20px; border-radius: 10px;
+      font-size: 14px; font-weight: 600; color: #fff;
+      box-shadow: 0 4px 12px rgba(0,0,0,.25);
+      opacity: 0; transform: translateX(40px);
+      animation: toastIn .3s ease forwards;
+    }
+    .toast.removing { animation: toastOut .3s ease forwards; }
+    .toast.error   { background: #d32f2f; }
+    .toast.success { background: #388E3C; }
+    .toast.info    { background: #1565C0; }
+    @keyframes toastIn  { to { opacity: 1; transform: translateX(0); } }
+    @keyframes toastOut { to { opacity: 0; transform: translateX(40px); } }
+
     /* --- Selected-box banner --- */
     .selected-banner {
       display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
@@ -348,6 +368,25 @@
   </div>
 
 <script>
+/* --- Toast notification helper (non-blocking, replaces alert()) --- */
+(function() {
+  const container = document.createElement('div');
+  container.className = 'toast-container';
+  document.body.appendChild(container);
+  window.showToast = function(msg, type, durationMs) {
+    type = type || 'info';
+    durationMs = durationMs || 5000;
+    const el = document.createElement('div');
+    el.className = 'toast ' + type;
+    el.textContent = msg;
+    container.appendChild(el);
+    setTimeout(function() {
+      el.classList.add('removing');
+      setTimeout(function() { el.remove(); }, 350);
+    }, durationMs);
+  };
+})();
+
 let buzzEnabled = false;
 let prevMotion = false;
 let lastBuzzMs = 0;
@@ -1183,7 +1222,7 @@ function showEnrollModal(det, idx) {
       close();
       requestIdentityRefresh();
     } catch (e) {
-      alert('Enrollment failed: ' + e.message);
+      showToast('Enrollment failed: ' + e.message, 'error');
       saveBtn.disabled = false;
       saveBtn.textContent = 'Save';
     }

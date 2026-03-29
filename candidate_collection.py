@@ -276,8 +276,13 @@ class CandidateCollector:
         if self.config.save_full_frame:
             frame_path = self._save_image(os.path.join(frame_dir, candidate_id), frame_rgb)
 
-        class_name = str(det.get("class", "")).strip().lower()
-        label = det.get("label")
+        raw_class_name = str(det.get("class", "")).strip().lower()
+        display_class_name = str(det.get("display_class", "")).strip().lower()
+        class_name = display_class_name or raw_class_name
+        if class_name not in self.config.target_classes:
+            class_name = raw_class_name
+
+        label = det.get("display_label") or det.get("label")
         identity_label = None
         if isinstance(label, str) and label.strip() and label.strip() != class_name:
             identity_label = label.strip()
@@ -287,6 +292,7 @@ class CandidateCollector:
             "candidate_id": candidate_id,
             "timestamp": created_at,
             "class_name": class_name,
+            "raw_class_name": raw_class_name,
             "identity_label": identity_label,
             "review_state": "unreviewed",
             "reviewed_at": None,
@@ -307,6 +313,11 @@ class CandidateCollector:
             "quality": {
                 **quality,
                 "face_visible": det.get("face_visible"),
+            },
+            "tracking": {
+                "display_class": det.get("display_class"),
+                "display_label": det.get("display_label"),
+                "display_class_reason": det.get("display_class_reason"),
             },
         }
 

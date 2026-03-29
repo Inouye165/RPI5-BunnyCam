@@ -27,6 +27,7 @@ def test_detect_worker_start_stop_and_restart(monkeypatch):
     calls = []
 
     monkeypatch.setattr(detect_module, "_load_yolo", lambda: None)
+    monkeypatch.setattr(detect_module, "_load_hailo", lambda: None)
     monkeypatch.setattr(detect_module, "_load_faces", lambda: None)
     monkeypatch.setattr(detect_module, "_load_pet_labels", lambda: None)
     monkeypatch.setattr(detect_module, "_load_pet_identities", lambda: None)

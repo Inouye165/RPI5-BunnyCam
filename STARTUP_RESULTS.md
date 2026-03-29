@@ -14,14 +14,17 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Lifecycle Commands
 <!-- STARTUP_COMMANDS_BEGIN -->
-- Start command: .\start_local.ps1
-- Stop command: .\stop_local.ps1
-- Default local endpoint: http://127.0.0.1:8001/
+- Start command (Pi): python3 sec_cam.py
+- Start command (Windows): .\start_local.ps1
+- Stop command (Windows): .\stop_local.ps1
+- Default browser endpoint (Pi): http://127.0.0.1:8000/
+- Default browser endpoint (Windows): http://127.0.0.1:8001/
+- Bind host override: set BUNNYCAM_HOST in .env.local (Pi uses this to bind to 127.0.0.1 instead of 0.0.0.0)
 - Managed components today: BunnyCam Python web process only.
 - Docker containers, separate workers, and extra servers: none configured in this repository today.
-- Runtime state file: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-runtime.json
-- Stdout log: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stdout.log
-- Stderr log: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stderr.log
+- Runtime state file (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-runtime.json
+- Stdout log (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stdout.log
+- Stderr log (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stderr.log
 <!-- STARTUP_COMMANDS_END -->
 
 ## Required Components And Versions
@@ -38,6 +41,20 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Run History
 <!-- STARTUP_RUN_HISTORY_BEGIN -->
+### 2026-03-28 08:06:27 | raspberrypi | restart | success
+
+- Timestamp: 2026-03-28 08:06:27
+- Hostname: raspberrypi
+- Actor: LLS (Copilot)
+- Action: restart
+- Backend: pi
+- Bind Host: 127.0.0.1
+- Port: 8000
+- URL: http://127.0.0.1:8000/
+- PID: 1566477
+- Summary: Restarted to load restored front-facing face encoding (Ron.npy).
+- Details: Previous CNN-based profile enrollment overwrote front-facing encoding, breaking all face identification. Regenerated Ron.npy from enrollment_images/Ron.jpg. Fixed snapshot_enroll() to refuse CNN-only overwrites of existing encodings. App healthy, loaded 1 face(s): ['Ron'].
+
 ### 2026-03-27 21:52:36 | Rons-Computer | start | success
 
 - Timestamp: 2026-03-27 21:52:36
@@ -433,10 +450,61 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: BunnyCam started successfully and passed the monitor window.
 - Managed Components: BunnyCam Python web process
 - Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-28 06:43:31 | raspberrypi | start | success
+
+- Timestamp: 2026-03-28 06:43:31
+- Hostname: raspberrypi
+- Actor: LLS
+- Action: start
+- Backend: pi
+- Bind Host: 127.0.0.1
+- Port: 8000
+- URL: http://127.0.0.1:8000/
+- PID: 1117466
+- Summary: BunnyCam started successfully and /status reports runtime_initialized=True, backend=pi, detection_enabled=True, face_recognition_enabled=True.
+- Managed Components: BunnyCam Python web process
+- Details: Killed prior instance, restarted with BUNNYCAM_HOST=127.0.0.1 via .env.local. Healthy on /status with runtime_initialized=True, backend=pi, app_version=v0.3.0 (main@993a23a), candidate_collection active, identity_labeling_enabled=True.
+### 2026-03-28 06:47:55 | raspberrypi | start | success
+
+- Timestamp: 2026-03-28 06:47:55
+- Hostname: raspberrypi
+- Actor: LLS
+- Action: start
+- Backend: pi
+- Bind Host: 127.0.0.1
+- Port: 8000
+- URL: http://127.0.0.1:8000/
+- PID: 1125005
+- Summary: BunnyCam restarted after prior instance became unresponsive. /status reports runtime_initialized=True, backend=pi, detection_enabled=True.
+- Managed Components: BunnyCam Python web process
+- Details: Prior PID 1117467 was running but not responding to /status. Killed and restarted. Healthy on http://127.0.0.1:8000/status. Updated STARTUP_RESULTS.md lifecycle commands and README.md to document consistent 127.0.0.1 browser address on Pi.
+### 2026-03-28 07:02:00 | raspberrypi | start | success
+
+- Timestamp: 2026-03-28 07:02:00
+- Hostname: raspberrypi
+- Actor: LLS
+- Action: start
+- Backend: pi
+- Bind Host: 127.0.0.1
+- Port: 8000
+- URL: http://127.0.0.1:8000/
+- PID: 1148109
+- Summary: BunnyCam restarted with enrollment and UI fixes. Healthy on /status, face_recognition and detection enabled.
+- Managed Components: BunnyCam Python web process
+- Details: Fixed snapshot_enroll to use progressive crop expansion and CNN face model for profile/side faces. Replaced blocking alert() with non-blocking toast notification to prevent stream freeze. Added detailed enrollment logging. Launched with nohup to prevent terminal signal stops.
 <!-- STARTUP_RUN_HISTORY_END -->
 
 ## LLS Session Notes
 <!-- STARTUP_LLS_NOTES_BEGIN -->
+### 2026-03-28 08:06 | raspberrypi | LLS
+
+- Timestamp: 2026-03-28 08:06
+- Hostname: raspberrypi
+- Actor: LLS (Copilot)
+- Issue: Face identification regression — after snapshot_enroll() was updated with progressive crop expansion and CNN fallback, the CNN profile enrollment overwrote the existing front-facing Ron.npy encoding, causing all live face identification to fail (live recognition uses HOG which never matches CNN profile encodings).
+- Fix: (1) Regenerated Ron.npy from enrollment_images/Ron.jpg (original front-facing photo). (2) Updated snapshot_enroll() to refuse CNN-only overwrites of existing enrolled identities — CNN-detected profile faces now return a helpful message instead of silently clobbering the good encoding.
+- Note: CNN and HOG face_recognition encodings are both 128-d but profile-view encodings diverge significantly from front-facing ones. Live recognition (HOG at 2fps) requires front-facing-quality encodings to match reliably.
+
 ### 2026-03-27 08:04:14 | Rons-Computer | LLS
 
 - Timestamp: 2026-03-27 08:04:14
@@ -502,6 +570,14 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Issue: Requested startup validation from STARTUP_RESULTS.md.
 - Fix: Executed the script-managed startup path so the run history and LLS notes are recorded in the standard format.
 - Note: Starting BunnyCam and verifying the endpoint status for this session.
+### 2026-03-28 06:43:31 | raspberrypi | LLS
+
+- Timestamp: 2026-03-28 06:43:31
+- Hostname: raspberrypi
+- Actor: LLS
+- Issue: User requested stop-then-start cycle; app was binding to 0.0.0.0 instead of the expected 127.0.0.1.
+- Fix: Created .env.local with BUNNYCAM_HOST=127.0.0.1 so the Pi backend binds to localhost by default. Restarted and verified /status healthy with runtime_initialized=True, detection and face recognition both enabled.
+- Note: App running on http://127.0.0.1:8000/ as v0.3.0 (main@993a23a). Camera streaming, candidate collection active, identity labeling enabled.
 <!-- STARTUP_LLS_NOTES_END -->
 
 

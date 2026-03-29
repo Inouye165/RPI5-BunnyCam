@@ -14,8 +14,8 @@ def test_startup_results_template_has_required_sections():
     assert "## Required Components And Versions" in content
     assert "## Run History" in content
     assert "## LLS Session Notes" in content
-    assert "Start command: .\\start_local.ps1" in content
-    assert "Stop command: .\\stop_local.ps1" in content
+    assert "Start command (Windows): .\\start_local.ps1" in content
+    assert "Stop command (Windows): .\\stop_local.ps1" in content
 
 
 def test_start_and_stop_scripts_exist():

@@ -1,0 +1,19 @@
+[Unit]
+Description=BunnyCam Raspberry Pi camera app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ron
+Group=ron
+WorkingDirectory=/home/ron/camera_site
+ExecStart=/home/ron/camera_site/.venv/bin/python /home/ron/camera_site/sec_cam.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/ron/camera_site/.env.local
+
+[Install]
+WantedBy=multi-user.target

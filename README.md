@@ -60,7 +60,7 @@ python3 -m pip install -r requirements.txt
 python3 sec_cam.py
 ```
 
-The default Pi bind address is `0.0.0.0:8000`, so browse to `http://localhost:8000/` on the Pi itself or replace `localhost` with the Pi LAN address from another machine.
+The default Pi bind address is `127.0.0.1:8000` (set via `.env.local`), so browse to `http://127.0.0.1:8000/` on the Pi itself. To allow remote access, change `BUNNYCAM_HOST` in `.env.local` to `0.0.0.0` or the desired interface address.
 
 Local Windows development with a laptop webcam:
 
@@ -249,7 +249,7 @@ journalctl -u sec-cam.service -b --no-pager | tail -100
 Browser address on Raspberry Pi default startup:
 
 ```text
-http://localhost:8000/
+http://127.0.0.1:8000/
 ```
 
 Browser address for the Windows local launcher and VS Code task/debug profile:
