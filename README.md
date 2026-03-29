@@ -246,6 +246,24 @@ sudo systemctl status sec-cam.service
 journalctl -u sec-cam.service -b --no-pager | tail -100
 ```
 
+Optional watchdog monitor:
+
+```bash
+sudo cp sec-cam-watchdog.service /etc/systemd/system/
+sudo cp sec-cam-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sec-cam-watchdog.timer
+systemctl list-timers sec-cam-watchdog.timer
+```
+
+The watchdog probes `http://127.0.0.1:8000/status` once per minute. If the app is hung but the process is still alive, it runs a clean `systemctl restart sec-cam.service`. Only after repeated failed restart recoveries does it escalate to `systemctl reboot`. Override behavior with `.env.local` if needed:
+
+```bash
+BUNNYCAM_WATCHDOG_TIMEOUT_SEC=5
+BUNNYCAM_WATCHDOG_POST_RESTART_GRACE_SEC=20
+BUNNYCAM_WATCHDOG_REBOOT_THRESHOLD=3
+```
+
 Browser address on Raspberry Pi default startup:
 
 ```text

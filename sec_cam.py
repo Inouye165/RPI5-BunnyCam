@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import glob
@@ -25,6 +26,7 @@ from version_info import get_app_version_info
 # Paths
 # --------------------
 BASE_DIR = os.path.dirname(__file__)
+EVENT_ZONES_PATH = os.path.join(BASE_DIR, "data", "event_zones.json")
 
 
 def _load_local_env(filename: str = ".env.local"):
@@ -178,6 +180,8 @@ cfg = {
     # ROI selection
     "roi_norm": None,               # [x1,y1,x2,y2] normalized 0..1
     "roi_lores": None,              # [x1,y1,x2,y2] in lores px
+    "pen_zone_norm": None,          # [x1,y1,x2,y2] normalized 0..1
+    "gate_line_norm": None,         # [x1,y1,x2,y2] normalized 0..1
 
     # Rotation
     "rotation": 0,
@@ -1184,6 +1188,8 @@ def _camera_config_payload():
         "detect_fps": cfg["detect_fps"],
         "event_cooldown_sec": cfg["event_cooldown_sec"],
         "roi_norm": cfg["roi_norm"],
+        "pen_zone_norm": cfg["pen_zone_norm"],
+        "gate_line_norm": cfg["gate_line_norm"],
         "rotation": cfg["rotation"],
         "record_enabled": cfg["record_enabled"],
         "record_segment_sec": cfg["record_segment_sec"],
@@ -1276,6 +1282,75 @@ def set_roi():
         motion_state["motion"] = False
 
     return jsonify({"ok": True})
+
+
+def _normalize_norm_box(value):
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError("box must contain four normalized values")
+    x1, y1, x2, y2 = [max(0.0, min(1.0, float(v))) for v in value]
+    return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+
+
+def _normalize_norm_line(value):
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError("line must contain four normalized values")
+    x1, y1, x2, y2 = [max(0.0, min(1.0, float(v))) for v in value]
+    return [x1, y1, x2, y2]
+
+
+@app.post("/set_event_zones")
+def set_event_zones():
+    data = request.get_json(silent=True) or {}
+
+    try:
+        with config_lock:
+            if "pen_zone_norm" in data:
+                cfg["pen_zone_norm"] = _normalize_norm_box(data.get("pen_zone_norm"))
+            if "gate_line_norm" in data:
+                cfg["gate_line_norm"] = _normalize_norm_line(data.get("gate_line_norm"))
+            payload = {
+                "ok": True,
+                "pen_zone_norm": cfg["pen_zone_norm"],
+                "gate_line_norm": cfg["gate_line_norm"],
+            }
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    _save_event_zones()
+    return jsonify(payload)
+
+
+def _save_event_zones():
+    """Persist current pen/gate zones to disk."""
+    data = {
+        "pen_zone_norm": cfg["pen_zone_norm"],
+        "gate_line_norm": cfg["gate_line_norm"],
+    }
+    os.makedirs(os.path.dirname(EVENT_ZONES_PATH), exist_ok=True)
+    with open(EVENT_ZONES_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_event_zones():
+    """Load saved pen/gate zones from disk into cfg."""
+    if not os.path.isfile(EVENT_ZONES_PATH):
+        return
+    try:
+        with open(EVENT_ZONES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "pen_zone_norm" in data:
+            cfg["pen_zone_norm"] = _normalize_norm_box(data.get("pen_zone_norm"))
+        if "gate_line_norm" in data:
+            cfg["gate_line_norm"] = _normalize_norm_line(data.get("gate_line_norm"))
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+
+_load_event_zones()
 
 
 @app.post("/focus")

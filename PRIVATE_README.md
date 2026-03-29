@@ -62,6 +62,18 @@ sudo systemctl status sec-cam.service
 journalctl -u sec-cam.service -b --no-pager | tail -100
 ```
 
+Watchdog installation:
+
+```bash
+sudo cp sec-cam-watchdog.service /etc/systemd/system/
+sudo cp sec-cam-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sec-cam-watchdog.timer
+journalctl -u sec-cam-watchdog.service -b --no-pager | tail -100
+```
+
+The watchdog checks `/status` every minute, prefers a clean `systemctl restart sec-cam.service`, and only escalates to `systemctl reboot` after repeated failed recoveries.
+
 Camera diagnostics:
 
 ```bash
