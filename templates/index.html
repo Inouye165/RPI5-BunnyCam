@@ -201,6 +201,26 @@
     .pen-event-time { font-size: 11px; opacity: 0.7; white-space: nowrap; }
     .pen-event-empty { font-size: 12px; opacity: 0.75; }
 
+    .bunny-movement-panel {
+      padding: 10px 12px;
+      background: #fef6e9; border: 2px solid #d4883e; border-radius: 12px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .bunny-movement-title { font-size: 13px; font-weight: 800; color: #7a4a14; display: flex; align-items: center; gap: 6px; }
+    .bunny-movement-distance {
+      font-size: 28px; font-weight: 900; color: #5b3410;
+      letter-spacing: -0.5px; line-height: 1.1;
+    }
+    .bunny-movement-distance .unit { font-size: 14px; font-weight: 700; opacity: 0.7; }
+    .bunny-movement-detail { font-size: 11px; color: #8a5e2a; line-height: 1.45; }
+    .bunny-movement-detail .label { font-weight: 700; }
+    .bunny-movement-sticky {
+      display: inline-block; padding: 2px 8px; border-radius: 6px;
+      font-size: 10px; font-weight: 800; text-transform: uppercase;
+    }
+    .bunny-movement-sticky.tracking { background: #c6f0c6; color: #1b6e1b; }
+    .bunny-movement-sticky.searching { background: #fde2b5; color: #7a4a14; }
+
     .move-events-panel {
       padding: 8px 12px;
       background: #f0f4ff; border: 2px solid #5c7cba; border-radius: 12px;
@@ -429,6 +449,17 @@
         </div>
       </div>
 
+      <div id="bunnyMovementPanel" class="bunny-movement-panel">
+        <div class="bunny-movement-title">&#x1F430; Pumpkin&rsquo;s Daily Movement</div>
+        <div id="bunnyDistance" class="bunny-movement-distance">0.0 <span class="unit">ft</span></div>
+        <div id="bunnyDetail" class="bunny-movement-detail">
+          <span class="label">Inches:</span> <span id="bunnyInches">0</span> &nbsp;
+          <span class="label">Segments:</span> <span id="bunnySegments">0</span> &nbsp;
+          <span class="label">Points:</span> <span id="bunnyPoints">0</span>
+        </div>
+        <div id="bunnyTrackStatus"></div>
+      </div>
+
       <div id="moveEventsPanel" class="move-events-panel">
         <div class="move-events-title">Movement Events</div>
         <div id="moveEventsList" class="move-events-list">
@@ -579,11 +610,9 @@ function unlockAudioTiny() {
 }
 
 function buzz() {
+  // Also fire the physical GPIO buzzer in sync
+  fetch('/api/alarm/buzz', { method: 'POST' }).catch(() => {});
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const compressor = ctx.createDynamicsCompressor();
-  const master = ctx.createGain();
-  const now = ctx.currentTime;
-  const durationSec = 0.18;
 
   compressor.threshold.value = -24;
   compressor.knee.value = 20;
@@ -979,11 +1008,9 @@ function processMovementEvents(status, detections) {
 }
 
 function dogSiren() {
+  // Also fire the physical GPIO siren in sync
+  fetch('/api/alarm/siren', { method: 'POST' }).catch(() => {});
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const compressor = ctx.createDynamicsCompressor();
-  const master = ctx.createGain();
-  const now = ctx.currentTime;
-  const durationSec = 1.6;
 
   compressor.threshold.value = -28;
   compressor.knee.value = 24;
@@ -1261,6 +1288,7 @@ document.getElementById('buzzBtn').addEventListener('click', () => {
 });
 
 document.getElementById('testBuzz').addEventListener('click', () => {
+  fetch('/api/alarm/buzz', { method: 'POST' }).catch(() => {});
   unlockAudioTiny();
   setTimeout(() => buzz(), 50);
 });
@@ -1575,6 +1603,55 @@ document.getElementById('jumpNow').addEventListener('click', async () => {
   await goToAgo(0);
 });
 
+// ── Bunny movement panel ────────────────────────────────────────────────────
+let _lastBunnyPoll = 0;
+const BUNNY_POLL_INTERVAL_MS = 5000;  // refresh every 5 seconds max
+
+function _updateBunnyPanel(data) {
+  const distEl = document.getElementById('bunnyDistance');
+  const inchEl = document.getElementById('bunnyInches');
+  const segEl  = document.getElementById('bunnySegments');
+  const ptsEl  = document.getElementById('bunnyPoints');
+  const statEl = document.getElementById('bunnyTrackStatus');
+  if (!distEl) return;
+
+  const feet = data.total_distance_feet != null ? data.total_distance_feet : 0;
+  const inches = data.total_distance_inches != null ? data.total_distance_inches : 0;
+  distEl.innerHTML = feet.toFixed(1) + ' <span class="unit">ft</span>';
+  inchEl.textContent = inches.toFixed(0);
+  segEl.textContent = String(data.segments || 0);
+  ptsEl.textContent = String(data.total_positions || 0);
+
+  if (data.active_track && data.active_track.is_sticky) {
+    statEl.innerHTML = '<span class="bunny-movement-sticky tracking">&#x2714; Tracking Pumpkin</span>';
+  } else if (data.active_track) {
+    statEl.innerHTML = '<span class="bunny-movement-sticky searching">&#x1F50D; Identifying&hellip;</span>';
+  } else {
+    statEl.innerHTML = '<span class="bunny-movement-sticky searching">&#x23F8; Not visible</span>';
+  }
+}
+
+async function pollBunnyMovement() {
+  const now = Date.now();
+  if (now - _lastBunnyPoll < BUNNY_POLL_INTERVAL_MS) return;
+  _lastBunnyPoll = now;
+  try {
+    const resp = await fetch('/api/movement/today');
+    if (!resp.ok) {
+      // Detect module not loaded yet or unavailable — show zeros.
+      _updateBunnyPanel({total_distance_feet: 0, total_distance_inches: 0, segments: 0, total_positions: 0, active_track: null});
+      return;
+    }
+    const data = await resp.json();
+    _updateBunnyPanel(data);
+  } catch (_) {
+    // Network error — leave panel as-is.
+  }
+}
+
+// Fire immediately on page load — don't wait for the first live-state poll.
+pollBunnyMovement();
+
 // Combined status + detections poll (one fetch instead of two)
 async function pollLiveState({ signal } = {}) {
   const j = await fetchJSON('/api/live-state', { signal });
@@ -1585,6 +1662,7 @@ async function pollLiveState({ signal } = {}) {
   const namedDogKey = dogProfile.identifiedDogKey;
   const penEvents = processPenEvents(d.detections);
   processMovementEvents(s, d.detections);
+  pollBunnyMovement();
   const gateTrackingReady = hasGateTrackingGeometry();
 
   // ── Status update ──
@@ -1642,6 +1720,9 @@ async function pollLiveState({ signal } = {}) {
       return false;
     });
 
+    // Alarm only fires when pen zone + gate line are configured and a
+    // dog actually crosses into or stops at the pen.  No fallback for
+    // dogs detected outside the pen — pen geometry is required.
     if (gateTrackingReady) {
       const namedEntered = alertableEvents.some(x => x.kind === 'enters_gate');
       const namedStopped = alertableEvents.some(x => x.kind === 'stops_at_gate');
@@ -1653,20 +1734,6 @@ async function pollLiveState({ signal } = {}) {
       } else if ((namedStopped || unknownStopped) && canPlayBuzz) {
         buzz();
         lastBuzzMs = now;
-      }
-    } else {
-      const dogJustIdentified = !!namedDogKey && namedDogKey !== prevIdentifiedDogKey;
-      if (dogJustIdentified && canPlayDogSiren) {
-        dogSiren();
-        lastDogSirenMs = now;
-      } else if (s.motion && !prevMotion) {
-        if (namedDogKey && canPlayDogSiren) {
-          dogSiren();
-          lastDogSirenMs = now;
-        } else if (dogKey && canPlayBuzz) {
-          buzz();
-          lastBuzzMs = now;
-        }
       }
     }
   }
