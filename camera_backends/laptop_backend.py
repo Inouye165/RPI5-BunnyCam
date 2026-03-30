@@ -46,6 +46,7 @@ class LaptopCameraBackend(CameraBackend):
 
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._main_size[0])
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._main_size[1])
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
 
     def _rotate_bgr(self, frame_bgr):
@@ -79,16 +80,20 @@ class LaptopCameraBackend(CameraBackend):
         cv2 = self._cv2
         assert cv2 is not None
 
-        # Pace expensive JPEG encode to the effective preview FPS.
-        # Camera reads continue at full speed to drain the webcam buffer
-        # and keep lores frames fresh for detection.
-        preview_max_fps = getattr(self.stream_output, "max_fps", None) or 30.0
-        preview_interval = 1.0 / preview_max_fps
-        last_encode_time = 0.0
-
         while not self._stop_evt.is_set():
-            ok, frame_bgr = self._capture.read()
-            if not ok or frame_bgr is None:
+            # Drain stale DirectShow buffer: buffered frames return
+            # from read() instantly (< 5 ms); a fresh frame blocks
+            # until the sensor delivers one (~33 ms at 30 fps).
+            frame_bgr = None
+            for _ in range(8):
+                t0 = time.monotonic()
+                ok, f = self._capture.read()
+                if not ok or f is None:
+                    break
+                frame_bgr = f
+                if (time.monotonic() - t0) > 0.005:
+                    break
+            if frame_bgr is None:
                 time.sleep(0.05)
                 continue
 
@@ -96,12 +101,12 @@ class LaptopCameraBackend(CameraBackend):
             lores_bgr = cv2.resize(frame_bgr, self._lores_size)
             lores_rgb = cv2.cvtColor(lores_bgr, cv2.COLOR_BGR2RGB)
 
-            now = time.monotonic()
-            if (now - last_encode_time) >= preview_interval:
-                ok_enc, encoded = self._encode_preview_frame(frame_bgr)
-                if ok_enc:
-                    self.stream_output.write(encoded.tobytes())
-                    last_encode_time = now
+            # Encode every fresh frame; StreamingOutput handles FPS
+            # pacing so we avoid the beat-frequency problem that
+            # halved the effective rate with a duplicate throttle.
+            ok_enc, encoded = self._encode_preview_frame(frame_bgr)
+            if ok_enc:
+                self.stream_output.write(encoded.tobytes())
 
             with self._frame_lock:
                 self._latest_lores = lores_rgb

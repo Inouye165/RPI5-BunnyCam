@@ -204,22 +204,26 @@ class StreamingOutput(io.BufferedIOBase):
         self.frame = None
         self.condition = Condition()
         self.max_fps = float(max_fps) if max_fps else None
-        self._last_publish_monotonic = 0.0
+        self._next_publish_monotonic = 0.0
 
     def set_max_fps(self, max_fps: float | None):
         with self.condition:
             self.max_fps = float(max_fps) if max_fps else None
-            self._last_publish_monotonic = 0.0
+            self._next_publish_monotonic = 0.0
 
     def write(self, buf):
         now = time.monotonic()
         with self.condition:
             self.frame = bytes(buf)
-            if self.max_fps and self.frame is not None:
-                min_interval = 1.0 / self.max_fps
-                if (now - self._last_publish_monotonic) < min_interval:
+            if self.max_fps:
+                if now < self._next_publish_monotonic:
                     return len(buf)
-            self._last_publish_monotonic = now
+                min_interval = 1.0 / self.max_fps
+                self._next_publish_monotonic += min_interval
+                # If we fell more than one interval behind (e.g. producer
+                # paused or first frame), snap forward to avoid a burst.
+                if self._next_publish_monotonic < now:
+                    self._next_publish_monotonic = now + min_interval
             self.condition.notify_all()
         return len(buf)
 
@@ -650,90 +654,104 @@ def motion_thresholds(base_min_changed, roi_area, full_area):
 # --------------------
 # Motion detection loop
 # --------------------
+def _check_disk_space_mb(path: str = ".", min_mb: int = 200) -> bool:
+    """Return True if at least *min_mb* MB are free on *path*'s volume."""
+    try:
+        import shutil
+        free = shutil.disk_usage(path).free
+        return free >= min_mb * 1024 * 1024
+    except OSError:
+        return True  # assume OK if check fails
+
+
 def motion_loop():
     last_event_time = 0.0
     prev_motion = False
 
     while not shutdown_evt.is_set():
-        start = time.time()
+        try:
+            start = time.time()
 
-        with config_lock:
-            pixel_thr = int(cfg["pixel_diff_threshold"])
-            base_min_changed = int(cfg["min_changed_pixels"])
-            detect_fps = float(cfg["detect_fps"])
-            cooldown = float(cfg["event_cooldown_sec"])
-            roi_lores = cfg["roi_lores"]
-            alpha = float(cfg["bg_alpha"])
-            alpha_motion = float(cfg["bg_alpha_motion"])
+            with config_lock:
+                pixel_thr = int(cfg["pixel_diff_threshold"])
+                base_min_changed = int(cfg["min_changed_pixels"])
+                detect_fps = float(cfg["detect_fps"])
+                cooldown = float(cfg["event_cooldown_sec"])
+                roi_lores = cfg["roi_lores"]
+                alpha = float(cfg["bg_alpha"])
+                alpha_motion = float(cfg["bg_alpha_motion"])
 
-        frame = capture_lores_array()
-        if frame is None:
-            elapsed = time.time() - start
-            time.sleep(max(0.0, (1.0 / detect_fps) - elapsed))
-            continue
-        gray = frame.mean(axis=2).astype(np.float32)
-
-        gray = roi_apply(gray, roi_lores)
-        gray = gray[::2, ::2]
-        gray = blur3x3(gray)
-
-        with caminfo_lock:
-            full_area = max(1, caminfo["down_w"] * caminfo["down_h"])
-        roi_area = max(1, int(gray.shape[0] * gray.shape[1]))
-        effective_min_changed, suspect_thr = motion_thresholds(
-            base_min_changed,
-            roi_area,
-            full_area,
-        )
-
-        with bg_lock:
-            if bg_model["warmup"] > 0 or bg_model["bg"] is None:
-                bg_model["warmup"] = max(0, bg_model["warmup"] - 1)
-                bg_model["bg"] = gray if bg_model["bg"] is None else (0.5 * bg_model["bg"] + 0.5 * gray)
-                with state_lock:
-                    motion_state["motion"] = False
-                    motion_state["changed_pixels"] = 0
-                    motion_state["effective_min_changed"] = effective_min_changed
-                    motion_state["suspect_threshold"] = suspect_thr
-
+            frame = capture_lores_array()
+            if frame is None:
                 elapsed = time.time() - start
                 time.sleep(max(0.0, (1.0 / detect_fps) - elapsed))
                 continue
+            gray = frame.mean(axis=2).astype(np.float32)
 
-            bg = bg_model["bg"]
+            gray = roi_apply(gray, roi_lores)
+            gray = gray[::2, ::2]
+            gray = blur3x3(gray)
 
-        diff = np.abs(gray - bg)
-        changed = int((diff > pixel_thr).sum())
-        motion = changed > suspect_thr
+            with caminfo_lock:
+                full_area = max(1, caminfo["down_w"] * caminfo["down_h"])
+            roi_area = max(1, int(gray.shape[0] * gray.shape[1]))
+            effective_min_changed, suspect_thr = motion_thresholds(
+                base_min_changed,
+                roi_area,
+                full_area,
+            )
 
-        with bg_lock:
-            a = alpha_motion if motion else alpha
-            bg_model["bg"] = (1.0 - a) * bg + a * gray
+            with bg_lock:
+                if bg_model["warmup"] > 0 or bg_model["bg"] is None:
+                    bg_model["warmup"] = max(0, bg_model["warmup"] - 1)
+                    bg_model["bg"] = gray if bg_model["bg"] is None else (0.5 * bg_model["bg"] + 0.5 * gray)
+                    with state_lock:
+                        motion_state["motion"] = False
+                        motion_state["changed_pixels"] = 0
+                        motion_state["effective_min_changed"] = effective_min_changed
+                        motion_state["suspect_threshold"] = suspect_thr
 
-        rising = motion and not prev_motion
-        prev_motion = motion
+                    elapsed = time.time() - start
+                    time.sleep(max(0.0, (1.0 / detect_fps) - elapsed))
+                    continue
 
-        with state_lock:
-            motion_state["motion"] = motion
-            motion_state["changed_pixels"] = changed
-            motion_state["effective_min_changed"] = effective_min_changed
-            motion_state["suspect_threshold"] = suspect_thr
+                bg = bg_model["bg"]
 
-        if rising:
-            now = time.time()
-            if now - last_event_time >= cooldown:
-                last_event_time = now
-                snap_path = None
-                jpeg = stream_output.frame
-                if jpeg:
-                    snap_path = save_snapshot(jpeg)
-                with state_lock:
-                    motion_state["events"] += 1
-                    motion_state["last_motion_ts"] = now_iso()
-                    motion_state["last_snapshot"] = snap_path
+            diff = np.abs(gray - bg)
+            changed = int((diff > pixel_thr).sum())
+            motion = changed > suspect_thr
 
-        elapsed = time.time() - start
-        time.sleep(max(0.0, (1.0 / detect_fps) - elapsed))
+            with bg_lock:
+                a = alpha_motion if motion else alpha
+                bg_model["bg"] = (1.0 - a) * bg + a * gray
+
+            rising = motion and not prev_motion
+            prev_motion = motion
+
+            with state_lock:
+                motion_state["motion"] = motion
+                motion_state["changed_pixels"] = changed
+                motion_state["effective_min_changed"] = effective_min_changed
+                motion_state["suspect_threshold"] = suspect_thr
+
+            if rising:
+                now = time.time()
+                if now - last_event_time >= cooldown:
+                    last_event_time = now
+                    snap_path = None
+                    jpeg = stream_output.frame
+                    if jpeg:
+                        snap_path = save_snapshot(jpeg)
+                    with state_lock:
+                        motion_state["events"] += 1
+                        motion_state["last_motion_ts"] = now_iso()
+                        motion_state["last_snapshot"] = snap_path
+
+            elapsed = time.time() - start
+            time.sleep(max(0.0, (1.0 / detect_fps) - elapsed))
+        except Exception as exc:
+            logger.error("motion_loop: unhandled error — %s", exc, exc_info=True)
+            time.sleep(1.0)
 
 
 # --------------------
@@ -774,121 +792,144 @@ def convert_worker():
         _ffmpeg_popen_extra['creationflags'] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
     else:
         _ffmpeg_popen_extra['preexec_fn'] = lambda: os.nice(10)
+    _ffmpeg_timeout = 120  # seconds; prevent stuck ffmpeg from blocking queue
     while not shutdown_evt.is_set():
         try:
-            item = convert_q.get(timeout=0.5)
-        except Empty:
-            continue
-        if item is None:
-            break
+            try:
+                item = convert_q.get(timeout=0.5)
+            except Empty:
+                continue
+            if item is None:
+                break
 
-        h264_path, start_epoch, duration = item
-        base = os.path.splitext(os.path.basename(h264_path))[0]
-        mp4_name = base + ".mp4"
-        mp4_path = os.path.join(RECORD_DIR_MP4, mp4_name)
+            h264_path, start_epoch, duration = item
+            base = os.path.splitext(os.path.basename(h264_path))[0]
+            mp4_name = base + ".mp4"
+            mp4_path = os.path.join(RECORD_DIR_MP4, mp4_name)
 
-        with config_lock:
-            fps = int(cfg["record_fps"])
+            if not _check_disk_space_mb(RECORD_DIR_MP4, min_mb=200):
+                logger.warning("convert_worker: low disk space, skipping %s", mp4_name)
+                convert_q.task_done()
+                continue
 
-        # Fast remux first (no re-encode). If it fails, fall back to re-encode.
-        ok = False
-        try:
-            cmd = [
-                "ffmpeg", "-y",
-                "-r", str(fps),
-                "-i", h264_path,
-                "-c:v", "copy",
-                "-movflags", "+faststart",
-                mp4_path
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, **_ffmpeg_popen_extra)
-            ok = True
-        except (OSError, subprocess.SubprocessError):
+            with config_lock:
+                fps = int(cfg["record_fps"])
+
+            # Fast remux first (no re-encode). If it fails, fall back to re-encode.
             ok = False
-
-        if not ok:
             try:
                 cmd = [
                     "ffmpeg", "-y",
                     "-r", str(fps),
                     "-i", h264_path,
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "23",
+                    "-c:v", "copy",
                     "-movflags", "+faststart",
                     mp4_path
                 ]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, **_ffmpeg_popen_extra)
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=_ffmpeg_timeout, **_ffmpeg_popen_extra)
                 ok = True
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired) as exc:
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    logger.warning("convert_worker: ffmpeg remux timed out for %s", h264_path)
                 ok = False
 
-        if ok:
-            with dvr_lock:
-                dvr_segments.append({"file": mp4_name, "start_epoch": int(start_epoch), "duration": int(duration)})
-                dvr_segments.sort(key=lambda x: x["start_epoch"])
+            if not ok:
+                try:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-r", str(fps),
+                        "-i", h264_path,
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-crf", "23",
+                        "-movflags", "+faststart",
+                        mp4_path
+                    ]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=_ffmpeg_timeout, **_ffmpeg_popen_extra)
+                    ok = True
+                except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired) as exc:
+                    if isinstance(exc, subprocess.TimeoutExpired):
+                        logger.warning("convert_worker: ffmpeg encode timed out for %s", h264_path)
+                    ok = False
 
-            prune_mp4()
+            if ok:
+                with dvr_lock:
+                    dvr_segments.append({"file": mp4_name, "start_epoch": int(start_epoch), "duration": int(duration)})
+                    dvr_segments.sort(key=lambda x: x["start_epoch"])
 
-            # Delete raw segment to save space
-            try:
-                os.remove(h264_path)
-            except OSError:
-                pass
+                prune_mp4()
 
-        convert_q.task_done()
+                # Delete raw segment to save space
+                try:
+                    os.remove(h264_path)
+                except OSError:
+                    pass
+
+            convert_q.task_done()
+        except Exception as exc:
+            logger.error("convert_worker: unhandled error — %s", exc, exc_info=True)
+            time.sleep(1.0)
 
 def rolling_record_loop():
     # Rotates raw .h264 segments quickly, then converts to MP4 in background.
     while not shutdown_evt.is_set():
-        backend = get_camera_backend()
-        with config_lock:
-            enabled = bool(cfg["record_enabled"])
-            seg = int(cfg["record_segment_sec"])
+        try:
+            backend = get_camera_backend()
+            with config_lock:
+                enabled = bool(cfg["record_enabled"])
+                seg = int(cfg["record_segment_sec"])
 
-        if not enabled or not backend.supports_recording:
+            if not enabled or not backend.supports_recording:
+                time.sleep(1.0)
+                continue
+
+            if not _check_disk_space_mb(RECORD_DIR_H264, min_mb=200):
+                logger.warning("rolling_record_loop: low disk space, pausing recording")
+                time.sleep(10.0)
+                continue
+
+            # Sleep until segment boundary
+            end_time = time.time() + seg
+            while time.time() < end_time and not shutdown_evt.is_set():
+                time.sleep(0.25)
+            if shutdown_evt.is_set():
+                break
+
+            # Rotate segment quickly
+            finished_h264 = None
+            finished_start_epoch = None
+
+            with camera_lock:
+                # We don't know the current file name from FileOutput cleanly,
+                # so we rotate by stopping and restarting with a new file path.
+                _stop_record_encoder()
+
+                # "Finished" file is the newest .h264 in directory at this moment
+                # (good enough for our naming scheme).
+                try:
+                    newest = sorted(glob.glob(os.path.join(RECORD_DIR_H264, "seg_*.h264")),
+                                    key=os.path.getmtime, reverse=True)[0]
+                    finished_h264 = newest
+                    # parse epoch from filename
+                    # seg_YYYYMMDD_HHMMSS.h264
+                    name = os.path.basename(newest)
+                    ts = name.replace("seg_", "").replace(".h264", "")
+                    dt = datetime.strptime(ts, "%Y%m%d_%H%M%S")
+                    finished_start_epoch = int(dt.timestamp())
+                except (IndexError, ValueError, OSError):
+                    finished_h264 = None
+                    finished_start_epoch = None
+
+                # Start next segment
+                next_path, _ = next_h264_segment()
+                _start_record_encoder(next_path)
+
+            # Queue conversion for finished segment (if found)
+            if finished_h264 and finished_start_epoch:
+                convert_q.put((finished_h264, finished_start_epoch, seg))
+        except Exception as exc:
+            logger.error("rolling_record_loop: unhandled error — %s", exc, exc_info=True)
             time.sleep(1.0)
-            continue
-
-        # Sleep until segment boundary
-        end_time = time.time() + seg
-        while time.time() < end_time and not shutdown_evt.is_set():
-            time.sleep(0.25)
-        if shutdown_evt.is_set():
-            break
-
-        # Rotate segment quickly
-        finished_h264 = None
-        finished_start_epoch = None
-
-        with camera_lock:
-            # We don't know the current file name from FileOutput cleanly,
-            # so we rotate by stopping and restarting with a new file path.
-            _stop_record_encoder()
-
-            # "Finished" file is the newest .h264 in directory at this moment
-            # (good enough for our naming scheme).
-            try:
-                newest = sorted(glob.glob(os.path.join(RECORD_DIR_H264, "seg_*.h264")),
-                                key=os.path.getmtime, reverse=True)[0]
-                finished_h264 = newest
-                # parse epoch from filename
-                # seg_YYYYMMDD_HHMMSS.h264
-                name = os.path.basename(newest)
-                ts = name.replace("seg_", "").replace(".h264", "")
-                dt = datetime.strptime(ts, "%Y%m%d_%H%M%S")
-                finished_start_epoch = int(dt.timestamp())
-            except (IndexError, ValueError, OSError):
-                finished_h264 = None
-                finished_start_epoch = None
-
-            # Start next segment
-            next_path, _ = next_h264_segment()
-            _start_record_encoder(next_path)
-
-        # Queue conversion for finished segment (if found)
-        if finished_h264 and finished_start_epoch:
-            convert_q.put((finished_h264, finished_start_epoch, seg))
 
 def load_existing_mp4_manifest():
     # On startup, load existing mp4 files so the slider works immediately after reboot
@@ -916,30 +957,34 @@ def reconfig_worker():
     """Handles camera reconfigurations off the Flask request threads."""
     while not shutdown_evt.is_set():
         try:
-            item = reconfigure_q.get(timeout=0.5)
-        except Empty:
-            continue
-        if item is None:
-            break
-        rotation = item
-        try:
-            apply_camera_config(rotation)
-            with config_lock:
-                roi_norm = cfg["roi_norm"]
-            if roi_norm is not None:
-                with caminfo_lock:
-                    lw, lh = caminfo["lores_w"], caminfo["lores_h"]
-                x1f, y1f, x2f, y2f = roi_norm
-                x1 = int(max(0.0, min(1.0, x1f)) * lw)
-                x2 = int(max(0.0, min(1.0, x2f)) * lw)
-                y1 = int(max(0.0, min(1.0, y1f)) * lh)
-                y2 = int(max(0.0, min(1.0, y2f)) * lh)
+            try:
+                item = reconfigure_q.get(timeout=0.5)
+            except Empty:
+                continue
+            if item is None:
+                break
+            rotation = item
+            try:
+                apply_camera_config(rotation)
                 with config_lock:
-                    cfg["roi_lores"] = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
-        except (OSError, RuntimeError, ValueError) as exc:
-            logger.warning("reconfig_worker error: %s", exc)
-        finally:
-            reconfigure_q.task_done()
+                    roi_norm = cfg["roi_norm"]
+                if roi_norm is not None:
+                    with caminfo_lock:
+                        lw, lh = caminfo["lores_w"], caminfo["lores_h"]
+                    x1f, y1f, x2f, y2f = roi_norm
+                    x1 = int(max(0.0, min(1.0, x1f)) * lw)
+                    x2 = int(max(0.0, min(1.0, x2f)) * lw)
+                    y1 = int(max(0.0, min(1.0, y1f)) * lh)
+                    y2 = int(max(0.0, min(1.0, y2f)) * lh)
+                    with config_lock:
+                        cfg["roi_lores"] = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning("reconfig_worker error: %s", exc)
+            finally:
+                reconfigure_q.task_done()
+        except Exception as exc:
+            logger.error("reconfig_worker: unhandled error — %s", exc, exc_info=True)
+            time.sleep(1.0)
 
 
 # --------------------
@@ -1321,7 +1366,10 @@ def set_event_zones():
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
-    _save_event_zones()
+    try:
+        _save_event_zones()
+    except OSError as exc:
+        logger.warning("set_event_zones: failed to persist — %s", exc)
     return jsonify(payload)
 
 
@@ -1771,10 +1819,12 @@ def _graceful_shutdown(_signum, _frame):
             _detect.stop()
         for thread in runtime_state.get("worker_threads", []):
             if thread.is_alive():
-                thread.join(timeout=1.0)
+                thread.join(timeout=2.0)
         with camera_lock:
             if runtime_state["camera_backend"] is not None:
                 runtime_state["camera_backend"].stop()
+    except Exception as exc:
+        logger.error("shutdown error: %s", exc)
     finally:
         raise SystemExit(0)
 

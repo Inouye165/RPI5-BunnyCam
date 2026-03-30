@@ -786,9 +786,10 @@ def _load_pet_labels() -> None:
             with open(LABELS_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                _pet_labels.clear()
-                _pet_labels.update(data)
-                logger.info("detect: loaded pet labels %s", _pet_labels)
+                with _lock:
+                    _pet_labels.clear()
+                    _pet_labels.update(data)
+                logger.info("detect: loaded pet labels %s", data)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("detect: could not load labels.json — %s", exc)
 
@@ -796,8 +797,10 @@ def _load_pet_labels() -> None:
 def _save_pet_labels() -> None:
     """Persist pet labels to faces/labels.json."""
     os.makedirs(FACES_DIR, exist_ok=True)
+    with _lock:
+        data = dict(_pet_labels)
     with open(LABELS_FILE, "w", encoding="utf-8") as fh:
-        json.dump(_pet_labels, fh, indent=2)
+        json.dump(data, fh, indent=2)
 
 
 def _load_pet_identities() -> None:
@@ -1018,6 +1021,8 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
         dets = _run_yolo(frame_rgb)
 
     # ── pet labels / lightweight promoted-gallery matching ────────────────────────────
+    with _lock:
+        pet_labels_snap = dict(_pet_labels)
     for d in dets:
         if d["class"] in {"cat", "dog"} and _pet_identity_matcher.is_enabled_for_class(d["class"]):
             d["_pet_matcher_active"] = True
@@ -1033,7 +1038,7 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
             }
             d["label"] = d["class"]
             continue
-        pet_name = _pet_labels.get(d["class"])
+        pet_name = pet_labels_snap.get(d["class"])
         if pet_name:
             d["label"] = pet_name
 
@@ -1099,7 +1104,12 @@ def _worker(get_frame_fn: Callable) -> None:
     # Lower this thread's priority so inference doesn't compete with
     # streaming and motion detection on constrained hardware.
     try:
-        if sys.platform != 'win32':
+        if sys.platform == 'win32':
+            import ctypes
+            BELOW_NORMAL = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), BELOW_NORMAL)
+        else:
             os.nice(5)
     except OSError:
         pass
@@ -1246,7 +1256,8 @@ def set_pet_label(cls: str, name: str) -> tuple[bool, str]:
     safe = name.strip()[:32]
     if not safe:
         return False, "name required"
-    _pet_labels[cls] = safe
+    with _lock:
+        _pet_labels[cls] = safe
     _save_pet_labels()
     return True, f"Labeled {cls} as '{safe}'"
 
@@ -1254,16 +1265,19 @@ def set_pet_label(cls: str, name: str) -> tuple[bool, str]:
 def remove_pet_label(cls: str) -> tuple[bool, str]:
     """Remove a pet label.  Thread-safe."""
     cls = cls.strip().lower()
-    if cls in _pet_labels:
-        del _pet_labels[cls]
-        _save_pet_labels()
-        return True, f"Removed label for '{cls}'"
-    return False, f"no label for '{cls}'"
+    with _lock:
+        if cls in _pet_labels:
+            del _pet_labels[cls]
+        else:
+            return False, f"no label for '{cls}'"
+    _save_pet_labels()
+    return True, f"Removed label for '{cls}'"
 
 
 def get_pet_labels() -> dict[str, str]:
     """Return current pet labels."""
-    return dict(_pet_labels)
+    with _lock:
+        return dict(_pet_labels)
 
 
 def remove_face(name: str) -> tuple[bool, str]:

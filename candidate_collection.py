@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import struct
 import time
 from dataclasses import dataclass
@@ -119,6 +120,14 @@ class CandidateCollector:
         if not self.config.enabled or frame_rgb is None or not detections:
             return []
 
+        try:
+            free = shutil.disk_usage(self.storage_root).free
+            if free < 200 * 1024 * 1024:
+                self._mark_skip("low_disk_space")
+                return []
+        except OSError:
+            pass
+
         if frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3:
             self._mark_skip("invalid_frame")
             return []
@@ -200,6 +209,20 @@ class CandidateCollector:
                 state.saved_count,
             )
             saved_records.append(record)
+
+        # Prune track states not seen in current detections and idle > 5 min
+        active_keys = {
+            (str(d.get("class", "")).strip().lower(), d.get("track_id"))
+            for d in detections
+            if isinstance(d.get("track_id"), int)
+        }
+        stale_cutoff = timestamp - 300.0
+        stale = [
+            k for k, s in self._track_states.items()
+            if k not in active_keys and s.last_saved_at < stale_cutoff
+        ]
+        for k in stale:
+            del self._track_states[k]
 
         return saved_records
 

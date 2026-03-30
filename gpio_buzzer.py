@@ -83,9 +83,13 @@ class GpioBuzzer:
         """Fire the buzzer with the given pattern in a background thread.
 
         Non-blocking.  Safe to call from request handlers.
+        Drops the request if a beep is already in progress.
         """
         if not self._available:
             return
+        if not self._lock.acquire(blocking=False):
+            return  # already buzzing
+        self._lock.release()
         threading.Thread(
             target=self._beep_worker,
             args=(on_time, off_time, count),

@@ -278,8 +278,8 @@ class _CountingStreamOutput:
         return len(buf)
 
 
-def test_laptop_capture_loop_skips_encode_when_within_preview_interval():
-    """Encode/write should be skipped for frames arriving faster than preview FPS."""
+def test_laptop_capture_loop_encodes_every_fresh_frame():
+    """Every fresh frame should be encoded — StreamingOutput handles pacing."""
     import camera_backends.laptop_backend as module
 
     stream = _CountingStreamOutput(max_fps=10.0)
@@ -290,22 +290,25 @@ def test_laptop_capture_loop_skips_encode_when_within_preview_interval():
     backend.rotation = 0
     backend._stop_evt.clear()
 
-    # First call returns a realistic value (triggers first encode since
-    # last_encode_time starts at 0.0). Remaining calls return the same
-    # timestamp, so (now - last) < interval and encodes are skipped.
+    # Each frame iteration needs 2 monotonic() calls: drain_start and
+    # drain_end (must be >0.005 after start to simulate blocking read).
     import unittest.mock as mock
-    time_values = [1000.0] + [1000.0] * 49
+    time_values = []
+    for _i in range(50):
+        time_values.extend([1000.0, 1000.01])
+    # Extra value for the drain-start call that discovers capture ended.
+    time_values.append(1000.0)
     with mock.patch.object(module.time, "monotonic", side_effect=time_values):
         backend._capture = _FakeCapture(50, backend._stop_evt)
         backend._capture_loop()
 
-    assert stream.write_count == 1, f"Expected 1 write, got {stream.write_count}"
+    assert stream.write_count == 50, f"Expected 50 writes, got {stream.write_count}"
     # Lores should be updated on every iteration
     assert backend._latest_lores is not None
 
 
 def test_laptop_capture_loop_encodes_when_interval_elapsed():
-    """Encode/write should fire each time enough time passes."""
+    """Encode/write should fire for every fresh frame."""
     import camera_backends.laptop_backend as module
     import unittest.mock as mock
 
@@ -317,9 +320,14 @@ def test_laptop_capture_loop_encodes_when_interval_elapsed():
     backend.rotation = 0
     backend._stop_evt.clear()
 
-    # 5 frames, each 0.2s apart (interval = 0.1s for 10fps) — all should encode.
-    # Start at 1000.0 so the first frame triggers (1000 - 0 >> interval).
-    time_values = [1000.0 + i * 0.2 for i in range(5)]
+    # 5 frames, each 0.2s apart.  All should be encoded.
+    # Each frame: drain_start, drain_end (>0.005 gap).
+    time_values = []
+    for i in range(5):
+        t = 1000.0 + i * 0.2
+        time_values.extend([t, t + 0.01])
+    # Extra value for the drain-start call that discovers capture ended.
+    time_values.append(1001.0)
     with mock.patch.object(module.time, "monotonic", side_effect=time_values):
         backend._capture = _FakeCapture(5, backend._stop_evt)
         backend._capture_loop()
@@ -340,9 +348,14 @@ def test_laptop_capture_loop_no_max_fps_encodes_every_frame():
     backend.rotation = 0
     backend._stop_evt.clear()
 
-    # max_fps=None → fallback 30fps, interval ≈ 0.033s.
-    # Frames 50ms apart exceed the interval, so every frame encodes.
-    time_values = [1000.0 + i * 0.05 for i in range(10)]
+    # Every frame should be encoded regardless of max_fps.
+    # Each frame: drain_start, drain_end (>0.005 gap).
+    time_values = []
+    for i in range(10):
+        t = 1000.0 + i * 0.05
+        time_values.extend([t, t + 0.01])
+    # Extra value for the drain-start call that discovers capture ended.
+    time_values.append(1001.0)
     with mock.patch.object(module.time, "monotonic", side_effect=time_values):
         backend._capture = _FakeCapture(10, backend._stop_evt)
         backend._capture_loop()
