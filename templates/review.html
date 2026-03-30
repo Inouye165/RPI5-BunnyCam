@@ -561,15 +561,21 @@
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'queue-item' + (index === currentIndex ? ' active' : '');
-        button.innerHTML = `
-          <strong>${item.identity_label || item.effective_class_name || item.class_name}</strong>
-          <small>${item.timestamp || 'unknown time'}</small>
-          <div class="chips">
-            <span class="chip">${item.review_state}</span>
-            <span class="chip">${item.effective_class_name}</span>
-            <span class="chip">track ${item.track_id ?? '-'}</span>
-          </div>
-        `;
+        const strong = document.createElement('strong');
+        strong.textContent = item.identity_label || item.effective_class_name || item.class_name;
+        const small = document.createElement('small');
+        small.textContent = item.timestamp || 'unknown time';
+        const chips = document.createElement('div');
+        chips.className = 'chips';
+        [item.review_state, item.effective_class_name, 'track ' + (item.track_id ?? '-')].forEach(t => {
+          const span = document.createElement('span');
+          span.className = 'chip';
+          span.textContent = t;
+          chips.appendChild(span);
+        });
+        button.appendChild(strong);
+        button.appendChild(small);
+        button.appendChild(chips);
         button.addEventListener('click', () => {
           currentIndex = index;
           renderCurrent();

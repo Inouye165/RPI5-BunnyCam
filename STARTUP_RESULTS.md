@@ -14,17 +14,14 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Lifecycle Commands
 <!-- STARTUP_COMMANDS_BEGIN -->
-- Start command (Pi): python3 sec_cam.py
-- Start command (Windows): .\start_local.ps1
-- Stop command (Windows): .\stop_local.ps1
-- Default browser endpoint (Pi): http://127.0.0.1:8000/
-- Default browser endpoint (Windows): http://127.0.0.1:8001/
-- Bind host override: set BUNNYCAM_HOST in .env.local (Pi uses this to bind to 127.0.0.1 instead of 0.0.0.0)
+- Start command: .\start_local.ps1
+- Stop command: .\stop_local.ps1
+- Default local endpoint: http://127.0.0.1:8001/
 - Managed components today: BunnyCam Python web process only.
 - Docker containers, separate workers, and extra servers: none configured in this repository today.
-- Runtime state file (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-runtime.json
-- Stdout log (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stdout.log
-- Stderr log (Windows): C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stderr.log
+- Runtime state file: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-runtime.json
+- Stdout log: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stdout.log
+- Stderr log: C:\Users\inouy\RPI5-BunnyCam\logs\bunnycam-start.stderr.log
 <!-- STARTUP_COMMANDS_END -->
 
 ## Required Components And Versions
@@ -41,6 +38,163 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## Run History
 <!-- STARTUP_RUN_HISTORY_BEGIN -->
+### 2026-03-30 15:28:50 | Rons-Computer | start | failure
+
+- Timestamp: 2026-03-30 15:28:50
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 2388
+- Summary: BunnyCam process stayed alive but /status stopped responding during the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: The request was canceled due to the configured HttpClient.Timeout of 3 seconds elapsing.
+### 2026-03-30 15:28:16 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-30 15:28:16
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 23640
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 23640 and removed runtime state.
+### 2026-03-30 14:45:43 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-30 14:45:43
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 23640
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-30 14:45:06 | Rons-Computer | stop | failure
+
+- Timestamp: 2026-03-30 14:45:06
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: n/a
+- Summary: No BunnyCam process was found to stop.
+- Managed Components: BunnyCam Python web process
+- Details: No BunnyCam process was found to stop. Removed stale runtime state for PID 26796.
+### 2026-03-30 14:20:20 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-30 14:20:20
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 26796
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-30 14:19:58 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-30 14:19:58
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 1036
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 1036 and removed runtime state.
+### 2026-03-30 13:18:03 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-30 13:18:03
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 1036
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-30 13:17:00 | Rons-Computer | stop | success
+
+- Timestamp: 2026-03-30 13:17:00
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 25484
+- Summary: BunnyCam stopped successfully.
+- Managed Components: BunnyCam Python web process
+- Details: Stopped process 25484 and removed runtime state.
+### 2026-03-30 13:00:55 PST | Rons-Computer | start | success
+
+- Timestamp: 2026-03-30 13:00:55 PST
+- Hostname: Rons-Computer
+- Actor: LLS (Copilot)
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 25484
+- App Version: v0.3.0 (main@20da1dd)
+- Branch: fix-class-smoothing
+- Summary: Started via start_local.ps1; health verified on /status endpoint.
+- Managed Components: BunnyCam Python web process
+- Details: All requirements already satisfied. /status returned runtime_initialized=True, backend=laptop, detection_enabled=True (yolov8n), face_recognition_enabled=True, identity_labeling_enabled=True, candidate_collection enabled (6 saved). Pet identity matching disabled (no promoted pet gallery). Accelerator in fallback-ultralytics mode.
+
+### 2026-03-30 13:00:12 | Rons-Computer | start | success
+
+- Timestamp: 2026-03-30 13:00:12
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: start
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: 25484
+- Summary: BunnyCam started successfully and passed the monitor window.
+- Managed Components: BunnyCam Python web process
+- Details: Healthy on /status with runtime_initialized=True and backend=laptop.
+### 2026-03-30 12:57:32 | Rons-Computer | stop | failure
+
+- Timestamp: 2026-03-30 12:57:32
+- Hostname: Rons-Computer
+- Actor: manual
+- Action: stop
+- Backend: laptop
+- Bind Host: 127.0.0.1
+- Port: 8001
+- URL: http://127.0.0.1:8001/
+- PID: n/a
+- Summary: No BunnyCam process was found to stop.
+- Managed Components: BunnyCam Python web process
+- Details: No BunnyCam process was found to stop. Removed stale runtime state for PID 35376.
 ### 2026-03-28 08:06:27 | raspberrypi | restart | success
 
 - Timestamp: 2026-03-28 08:06:27
@@ -496,6 +650,15 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 
 ## LLS Session Notes
 <!-- STARTUP_LLS_NOTES_BEGIN -->
+### 2026-03-30 14:46 | Rons-Computer | LLS
+
+- Timestamp: 2026-03-30 14:46
+- Hostname: Rons-Computer
+- Actor: LLS (Copilot)
+- Issue: Comprehensive robustness review identified 11 hardening issues across frontend and backend (P0–P3).
+- Fix: Applied all fixes — (1) buzz()/dogSiren() missing AudioContext variable declarations in index.html, (2) XSS via innerHTML in review.html replaced with DOM API, (3) unbounded _track_states growth in candidate_collection.py pruned after 5 min idle, (4) all 4 worker threads (motion_loop, convert_worker, rolling_record_loop, reconfig_worker) wrapped in try/except with error logging, (5) _graceful_shutdown hardened with exception handler and 2s join timeout, (6) _pet_labels race condition fixed with _lock in all read/write paths in detect.py, (7) disk space guards (200 MB floor) added to candidate_collection, convert_worker, rolling_record_loop, (8) ffmpeg 120s timeout to prevent stuck conversions, (9) GPIO buzzer rate-limited with non-blocking lock, (10) browser cooldown map pruning when >100 entries, (11) set_event_zones OSError handling. Tests: 209/210 passed (1 pre-existing failure in test_startup_scripts.py).
+- Note: Branch is main@20da1dd. All changes are on local working tree, not yet committed. 2TB NVMe M.2 drive makes disk space less critical but guards are still good practice.
+
 ### 2026-03-28 08:06 | raspberrypi | LLS
 
 - Timestamp: 2026-03-28 08:06
@@ -618,3 +781,33 @@ It records lifecycle commands, required component versions, run outcomes, and LL
 - Summary: BunnyCam started successfully on Pi backend and processed candidate captures.
 - Managed Components: BunnyCam Python web process
 - Details: /status endpoint should report runtime_initialized=True and backend=pi.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

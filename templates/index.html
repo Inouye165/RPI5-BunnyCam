@@ -613,6 +613,10 @@ function buzz() {
   // Also fire the physical GPIO buzzer in sync
   fetch('/api/alarm/buzz', { method: 'POST' }).catch(() => {});
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const compressor = ctx.createDynamicsCompressor();
+  const master = ctx.createGain();
+  const now = ctx.currentTime;
+  const durationSec = 0.25;
 
   compressor.threshold.value = -24;
   compressor.knee.value = 20;
@@ -766,6 +770,10 @@ function addPenEvent(kind, subject, trackKey, now, extra) {
     return null;
   }
   penEventCooldowns.set(cooldownKey, now);
+  // Prune stale cooldown entries every 100th event
+  if (penEventCooldowns.size > 100) {
+    for (const [k, v] of penEventCooldowns) { if ((now - v) > 60000) penEventCooldowns.delete(k); }
+  }
   const suffix = extra || '';
   const text = kind === 'enters_gate'
     ? `${subject} enters gate`
@@ -925,6 +933,10 @@ function addMovementEvent(text, cls, now) {
   const lastMs = moveEventCooldowns.get(cooldownKey) || 0;
   if ((now - lastMs) < MOVE_EVENT_COOLDOWN_MS) return null;
   moveEventCooldowns.set(cooldownKey, now);
+  // Prune stale cooldown entries
+  if (moveEventCooldowns.size > 100) {
+    for (const [k, v] of moveEventCooldowns) { if ((now - v) > 60000) moveEventCooldowns.delete(k); }
+  }
   const item = { id: ++eventSequence, text, cls, ts: now };
   moveEventItems.unshift(item);
   moveEventItems = moveEventItems.slice(0, MOVE_EVENT_LIMIT);
@@ -1011,6 +1023,10 @@ function dogSiren() {
   // Also fire the physical GPIO siren in sync
   fetch('/api/alarm/siren', { method: 'POST' }).catch(() => {});
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const compressor = ctx.createDynamicsCompressor();
+  const master = ctx.createGain();
+  const now = ctx.currentTime;
+  const durationSec = 1.8;
 
   compressor.threshold.value = -28;
   compressor.knee.value = 24;
@@ -1828,13 +1844,19 @@ function refreshLiveOverlayLayout(force = false) {
   }
 }
 
-function drawPenZone(ctx, norm, w, h) {
+function drawPenZone(ctx, norm, w, h, occupied) {
   if (!norm) return;
   const [x1, y1, x2, y2] = norm;
   ctx.save();
-  ctx.strokeStyle = 'rgba(74, 159, 104, 0.95)';
-  ctx.lineWidth = 2;
-  ctx.fillStyle = 'rgba(74, 159, 104, 0.12)';
+  if (occupied) {
+    ctx.strokeStyle = 'rgba(211, 47, 47, 0.95)';
+    ctx.lineWidth = 3;
+    ctx.fillStyle = 'rgba(211, 47, 47, 0.18)';
+  } else {
+    ctx.strokeStyle = 'rgba(74, 159, 104, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(74, 159, 104, 0.12)';
+  }
   ctx.strokeRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
   ctx.fillRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
   ctx.restore();
@@ -1865,7 +1887,18 @@ function drawDetections(dets) {
   const h = detectCanvas.height;
   detectCtx.clearRect(0, 0, w, h);
   if (showZones) {
-    drawPenZone(detectCtx, penZoneNorm, w, h);
+    let penOccupied = false;
+    if (penZoneNorm) {
+      for (const d of dets) {
+        const cx = (d.box[0] + d.box[2]) / 2;
+        const cy = (d.box[1] + d.box[3]) / 2;
+        if (cx >= penZoneNorm[0] && cx <= penZoneNorm[2] && cy >= penZoneNorm[1] && cy <= penZoneNorm[3]) {
+          penOccupied = true;
+          break;
+        }
+      }
+    }
+    drawPenZone(detectCtx, penZoneNorm, w, h, penOccupied);
     drawGateLine(detectCtx, gateLineNorm, w, h);
   }
   detectCtx.font = 'bold 13px sans-serif';
