@@ -39,6 +39,7 @@ import numpy as np
 from candidate_collection import CandidateCollector, CandidateCollectorConfig
 from hailo_status import get_hailo_status
 from identity_gallery import load_known_face_gallery
+from movement_tracker import BunnyMovementTracker
 from pet_identity import PetIdentityMatcher
 
 try:
@@ -199,6 +200,9 @@ _stop         = threading.Event()
 _thread_lock  = threading.Lock()
 _worker_state = {"thread": None}
 _candidate_collector = CandidateCollector(CANDIDATE_ROOT, CandidateCollectorConfig())
+_movement_tracker = BunnyMovementTracker(
+    storage_root=os.path.join(BASE_DIR, "data", "movement"),
+)
 
 
 # ── lightweight detection tracker ─────────────────────────────────────────────
@@ -1122,6 +1126,7 @@ def _worker(get_frame_fn: Callable) -> None:
                     frame_source="detect_worker",
                     captured_at=time.time(),
                 )
+                _movement_tracker.update(dets)
                 with _lock:
                     _latest["detections"] = dets
                     _latest["ts"]         = time.time()
@@ -1147,6 +1152,7 @@ def start(get_frame_fn: Callable) -> None:
 
 def stop(timeout: float = 1.0) -> None:
     _stop.set()
+    _movement_tracker.flush()
     with _thread_lock:
         thread = _worker_state["thread"]
         _worker_state["thread"] = None
@@ -1376,3 +1382,25 @@ def snapshot_enroll(name: str, box: list[float]) -> tuple[bool, str]:
     except (OSError, ValueError, RuntimeError) as exc:
         logger.warning("enroll: error for '%s' — %s", safe, exc)
         return False, str(exc)
+
+
+# ── bunny movement tracking public API ────────────────────────────────────────
+
+def get_movement_summary() -> dict:
+    """Return today's bunny movement summary."""
+    return _movement_tracker.get_today_summary()
+
+
+def get_movement_detail() -> dict:
+    """Return today's full bunny movement data with all segments."""
+    return _movement_tracker.get_today_detail()
+
+
+def get_movement_day(day_str: str) -> dict | None:
+    """Return movement data for a specific day (YYYY-MM-DD)."""
+    return _movement_tracker.get_day(day_str)
+
+
+def set_movement_calibration(inches_per_norm: float) -> None:
+    """Update the movement calibration at runtime."""
+    _movement_tracker.set_calibration(inches_per_norm)

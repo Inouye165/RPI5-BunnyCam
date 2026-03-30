@@ -15,6 +15,7 @@ from urllib.parse import quote
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from candidate_collection import encode_rgb_bmp
+from gpio_buzzer import get_buzzer as _get_buzzer
 from hailo_status import get_hailo_status
 from identity_gallery import ReviewedIdentityPromoter
 from reviewed_export import ReviewedDatasetExporter
@@ -1532,6 +1533,70 @@ def candidate_collection_asset(asset_path):
 
     directory, filename = os.path.split(absolute_path)
     return send_from_directory(directory, filename, as_attachment=False)
+
+
+# ── bunny movement tracking endpoints ─────────────────────────────────────────
+
+@app.get("/api/movement/today")
+def movement_today_summary():
+    if _detect is None:
+        return jsonify({"error": "detect module unavailable"}), 503
+    return jsonify(_detect.get_movement_summary())
+
+
+@app.get("/api/movement/today/detail")
+def movement_today_detail():
+    if _detect is None:
+        return jsonify({"error": "detect module unavailable"}), 503
+    return jsonify(_detect.get_movement_detail())
+
+
+@app.get("/api/movement/day/<day_str>")
+def movement_day(day_str):
+    if _detect is None:
+        return jsonify({"error": "detect module unavailable"}), 503
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", day_str):
+        return jsonify({"error": "invalid date format, use YYYY-MM-DD"}), 400
+    data = _detect.get_movement_day(day_str)
+    if data is None:
+        return jsonify({"error": f"no data for {day_str}"}), 404
+    return jsonify(data)
+
+
+@app.post("/api/movement/calibrate")
+def movement_calibrate():
+    if _detect is None:
+        return jsonify({"error": "detect module unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    value = body.get("inches_per_norm")
+    if value is None or not isinstance(value, (int, float)) or value <= 0:
+        return jsonify({"ok": False, "error": "inches_per_norm must be a positive number"}), 400
+    _detect.set_movement_calibration(float(value))
+    return jsonify({"ok": True, "inches_per_norm": float(value)})
+
+
+# ── physical buzzer alarm endpoints ───────────────────────────────────────────
+
+@app.post("/api/alarm/buzz")
+def alarm_buzz():
+    """Fire a short buzz on the physical GPIO buzzer."""
+    buzzer = _get_buzzer()
+    buzzer.quick_buzz()
+    return jsonify({"ok": True, "available": buzzer.available})
+
+
+@app.post("/api/alarm/siren")
+def alarm_siren():
+    """Fire a siren pattern on the physical GPIO buzzer."""
+    buzzer = _get_buzzer()
+    buzzer.siren()
+    return jsonify({"ok": True, "available": buzzer.available})
+
+
+@app.get("/api/alarm/status")
+def alarm_status():
+    return jsonify(_get_buzzer().get_status())
 
 
 @app.get("/api/review/candidates")
