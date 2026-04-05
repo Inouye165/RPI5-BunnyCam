@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 MOVE_THRESHOLD = 0.02
 
 # Seconds of detection absence before a track segment is considered ended.
-SEGMENT_GAP_SEC = 10.0
+SEGMENT_GAP_SEC = 120.0
 
 # Number of consecutive bunny identifications required before the identity
 # becomes "sticky" — harder to override by a single mis-classification.
@@ -50,10 +50,10 @@ BUNNY_STICKY_BONUS = 2.0
 
 # Maximum seconds a track can go undetected and still be considered the
 # same bunny (for stitching segments across brief gaps).
-BUNNY_STITCH_GAP_SEC = 30.0
+BUNNY_STITCH_GAP_SEC = 300.0
 
 # Maximum normalised centroid distance to stitch two segments together.
-BUNNY_STITCH_MAX_DIST = 0.15
+BUNNY_STITCH_MAX_DIST = 0.25
 
 # Default calibration: physical inches per one normalised coordinate unit.
 # Override via BUNNYCAM_CALIBRATION_INCHES_PER_NORM env var, or call

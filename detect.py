@@ -131,8 +131,14 @@ TRACK_CDIST_MAX      = 0.20
 # same track without making different nearby objects collapse together.
 TRACK_CROSS_CLASS_IOU_MIN = _env_float("BUNNYCAM_CROSS_CLASS_IOU_MIN", 0.45, minimum=0.0, maximum=1.0)
 TRACK_CROSS_CLASS_CDIST_MAX = _env_float("BUNNYCAM_CROSS_CLASS_CDIST_MAX", 0.14, minimum=0.0, maximum=1.0)
-# Frames without a match before a track is discarded.  At 2 fps this is ~4 s.
-TRACK_MAX_MISS       = 8
+# Frames without a match before a track is discarded.  At 2 fps this is ~15 s.
+TRACK_MAX_MISS       = 30
+# Extra miss frames allowed for tracks that have been stationary (low movement).
+# A stationary bunny can survive up to TRACK_MAX_MISS + TRACK_STATIONARY_BONUS
+# frames of detection gaps (~45 s at 2 fps).
+TRACK_STATIONARY_BONUS = _env_int("BUNNYCAM_STATIONARY_BONUS", 60, minimum=0, maximum=240)
+# Max centroid movement (normalised) over recent frames to be considered stationary.
+TRACK_STATIONARY_THRESHOLD = _env_float("BUNNYCAM_STATIONARY_THRESHOLD", 0.03, minimum=0.0, maximum=0.5)
 # A new face-recognition result must beat the track's best recorded distance by
 # at least this margin before we overwrite an existing confirmed identity.
 # 0.08 prevents name-flipping on small frame-to-frame distance fluctuations.
@@ -150,8 +156,34 @@ PET_MATCH_MIN_TRACK_HITS = 3
 PET_MATCH_GRACE_FRAMES = 3
 PET_MATCH_SWITCH_MARGIN = 0.08
 
-# COCO-80 class IDs we care about
+# COCO-80 class IDs we care about.
+# 'rabbit' is not a COCO class — rabbits are commonly misclassified as one of
+# several small-animal or plush-toy classes.  We map all plausible rabbit
+# classes to "cat" so the downstream tracker treats them as the bunny.
 WATCH_CLASSES: dict[int, str] = {0: "person", 15: "cat", 16: "dog"}
+
+# Extra COCO classes that a rabbit might be detected as.
+# All of these are remapped to "cat" for tracking purposes.
+RABBIT_ALIAS_CLASSES: dict[int, str] = {
+    14: "cat",   # bird          — small animal shape
+    17: "cat",   # horse         — occasional quadruped confusion
+    18: "cat",   # sheep         — similar size/fur
+    19: "cat",   # cow           — quadruped
+    20: "cat",   # elephant      — rare, but small grey rabbit
+    21: "cat",   # bear          — compact animal shape
+    77: "cat",   # teddy bear    — very common rabbit confusion
+}
+
+# Combined map used for Hailo decoding and YOLO class filtering.
+_ALL_WATCH_CLASSES: dict[int, str] = {**WATCH_CLASSES, **RABBIT_ALIAS_CLASSES}
+
+# Minimum confidence for rabbit-alias detections.  Lower than the main
+# threshold because COCO models are inherently uncertain about rabbits.
+RABBIT_ALIAS_CONF = _env_float("BUNNYCAM_RABBIT_ALIAS_CONF", 0.25, minimum=0.05, maximum=1.0)
+
+# Log all raw Hailo/YOLO detections above this very low threshold for
+# debugging which class the model actually fires for the rabbit.
+DEBUG_RAW_DETECTIONS = _env_bool("BUNNYCAM_DEBUG_RAW_DETECTIONS", False)
 
 
 def _hailo_profile() -> dict[str, object]:
@@ -166,7 +198,7 @@ def _hailo_profile() -> dict[str, object]:
     return {
         "name": "hailo-yolov8s",
         "hef_path": HAILO_YOLOV8S_HEF_PATH,
-        "class_map": dict(WATCH_CLASSES),
+        "class_map": dict(_ALL_WATCH_CLASSES),
         "face_labels": set(),
         "integration_mode": "hailo-full",
     }
@@ -537,13 +569,39 @@ class _DetectionTracker:
                 track["miss_count"] += 1
 
         # ── prune expired tracks ──────────────────────────────────────────
-        self._tracks = [t for t in self._tracks if t["miss_count"] <= TRACK_MAX_MISS]
+        self._tracks = [t for t in self._tracks if t["miss_count"] <= self._max_miss_for(t)]
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _max_miss_for(track: dict) -> int:
+        """Compute the max-miss threshold for a track.
+
+        Stationary tracks (low recent movement) get a patience bonus so a
+        bunny sitting still is not dropped after only a few seconds of
+        missed detections.
+        """
+        if track.get("is_stationary"):
+            return TRACK_MAX_MISS + TRACK_STATIONARY_BONUS
+        return TRACK_MAX_MISS
 
     # ------------------------------------------------------------------
     def _merge(self, det: dict, track: dict, now: float, _match_reason: str = "") -> None:
         """Update *track* position + label from a matched *det*."""
         previous_display_class = str(track.get("display_class") or "unknown")
-        track["box"]        = det["box"][:]
+        # Track recent centroid movement to detect stationary objects.
+        old_box = track["box"]
+        new_box = det["box"]
+        cdist = _centre_dist(old_box, new_box)
+        move_history = list(track.get("recent_movement", []))
+        move_history.append(cdist)
+        if len(move_history) > 10:
+            del move_history[:-10]
+        track["recent_movement"] = move_history
+        # Mark stationary if average recent movement is small.
+        avg_move = sum(move_history) / len(move_history) if move_history else 1.0
+        track["is_stationary"] = avg_move < TRACK_STATIONARY_THRESHOLD
+
+        track["box"]        = new_box[:]
         track["miss_count"] = 0
         track["last_seen"]  = now
         track["track_hits"] += 1
@@ -908,9 +966,6 @@ def _decode_hailo_outputs(
     face_label_set = set(face_labels or set())
 
     for class_index, rows in enumerate(outputs):
-        class_name = class_map.get(class_index)
-        if class_name is None:
-            continue
         if rows is None:
             continue
         class_rows = np.asarray(rows)
@@ -918,11 +973,26 @@ def _decode_hailo_outputs(
             continue
         if class_rows.ndim == 1:
             class_rows = class_rows.reshape(1, -1)
+
+        class_name = class_map.get(class_index)
+        is_rabbit_alias = class_index in RABBIT_ALIAS_CLASSES
+        min_conf = RABBIT_ALIAS_CONF if is_rabbit_alias else HAILO_CONF
+
         for row in class_rows:
             if len(row) < 5:
                 continue
             conf = float(row[4])
-            if conf < HAILO_CONF:
+
+            # Debug: log ALL detections from any class above 0.15
+            if DEBUG_RAW_DETECTIONS and conf >= 0.15:
+                logger.info(
+                    "detect-raw: hailo class_idx=%d conf=%.3f (mapped=%s)",
+                    class_index, conf, class_name or "IGNORED",
+                )
+
+            if class_name is None:
+                continue
+            if conf < min_conf:
                 continue
             box = _map_hailo_box_to_frame(row, frame_w, frame_h, scale, pad_x, pad_y)
             if box is None:
@@ -935,6 +1005,7 @@ def _decode_hailo_outputs(
                 "class": class_name,
                 "conf": round(conf, 2),
                 "box": box,
+                "_raw_class_index": class_index,
             })
 
     return detections, face_boxes
@@ -977,10 +1048,14 @@ def _run_yolo(frame_rgb: np.ndarray, classes: list[int] | None = None) -> list[d
 
     dets: list[dict] = []
     try:
+        # Use the full class list (including rabbit aliases) unless caller
+        # explicitly restricts classes (e.g. hybrid mode pets-only pass).
+        yolo_classes = classes if classes is not None else list(_ALL_WATCH_CLASSES.keys())
+        yolo_conf = min(DETECT_CONF, RABBIT_ALIAS_CONF) if classes is None else DETECT_CONF
         results = yolo.predict(
             frame_rgb,
-            conf=DETECT_CONF,
-            classes=classes if classes is not None else list(WATCH_CLASSES.keys()),
+            conf=yolo_conf,
+            classes=yolo_classes,
             verbose=False,
         )
         for r in results:
@@ -989,13 +1064,22 @@ def _run_yolo(frame_rgb: np.ndarray, classes: list[int] | None = None) -> list[d
             for box in r.boxes:
                 cls_id   = int(box.cls[0])
                 conf     = float(box.conf[0])
-                cls_name = WATCH_CLASSES.get(cls_id, "?")
+                cls_name = _ALL_WATCH_CLASSES.get(cls_id, "?")
+                if cls_name == "?":
+                    continue
+                # Apply per-class confidence threshold
+                is_alias = cls_id in RABBIT_ALIAS_CLASSES
+                if is_alias and conf < RABBIT_ALIAS_CONF:
+                    continue
+                if not is_alias and conf < DETECT_CONF:
+                    continue
                 x1, y1, x2, y2 = [float(v) for v in box.xyxyn[0]]
                 dets.append({
                     "label": cls_name,
                     "class": cls_name,
                     "conf":  round(conf, 2),
                     "box":   [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                    "_raw_class_index": cls_id,
                 })
     except (RuntimeError, ValueError, OSError) as exc:
         logger.debug("detect: YOLO error — %s", exc)
@@ -1087,8 +1171,9 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     _tracker.update(dets)
 
     # Strip any remaining internal key (safety net).
-    for d in person_dets:
+    for d in dets:
         d.pop("_face_dist", None)
+        d.pop("_raw_class_index", None)
 
     return dets
 
