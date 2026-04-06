@@ -473,7 +473,6 @@ def test_review_schema_fields_persist_through_update(tmp_path):
 def test_review_schema_fields_default_safely_for_old_metadata(tmp_path):
     """Older v1 metadata lacking Phase 2/3 fields still loads with safe defaults."""
     # Manually write a v1 metadata file without Phase 2/3 fields
-    import os
     meta_dir = tmp_path / "data" / "candidates" / "metadata" / "2026" / "01" / "01"
     meta_dir.mkdir(parents=True, exist_ok=True)
     v1_payload = {
@@ -655,3 +654,76 @@ def test_fallback_does_not_affect_normal_collect(tmp_path):
 
     assert collector.get_status()["saved_total"] == 2
     assert collector.get_status()["fallback_saved_total"] == 1
+
+
+# ── Phase 5: quality gate and continuity metadata routing ───────────────────
+
+
+def test_edge_touch_cat_routes_to_partial_hard_case_with_full_frame(tmp_path):
+    collector = _collector(tmp_path)
+
+    records = collector.collect(
+        _frame(),
+        [_detection(class_name="cat", track_id=60, box=[0.0, 0.12, 0.42, 0.78], conf=0.78)],
+        captured_at=100.0,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["capture_reason"] == "detected_partial_edge"
+    assert record["sample_kind"] == "hard_case"
+    assert record["visibility_state"] == "partial"
+    assert record["bbox_review_state"] == "detector_box_ok"
+    assert record["full_frame_retained"] is True
+    assert record["bbox_edge_touch"]["left"] is True
+
+
+def test_fallback_edge_touch_marks_partial_visibility(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+
+    result = collector.collect_fallback(
+        _frame(),
+        _fallback_signal(last_cx=0.08, last_cy=0.5),
+        captured_at=100.0,
+    )
+
+    assert result is not None
+    assert result["capture_reason"] == "fallback_recent_bunny_track"
+    assert result["sample_kind"] == "hard_case"
+    assert result["visibility_state"] == "partial"
+    assert result["bbox_edge_touch"]["left"] is True
+
+
+def test_low_confidence_rabbit_alias_routes_to_blurry_hard_case(tmp_path):
+    collector = _collector(tmp_path)
+    frame = np.full((240, 320, 3), 127, dtype=np.uint8)
+    checker = ((np.indices((240, 320)).sum(axis=0) % 2) * 2).astype(np.uint8)
+    frame += checker[:, :, None]
+    det = _detection(class_name="cat", track_id=61, conf=0.44, box=[0.2, 0.2, 0.55, 0.56])
+    det["is_rabbit_alias"] = True
+
+    records = collector.collect(frame, [det], captured_at=100.0)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["capture_reason"] == "detected_low_confidence_alias"
+    assert record["sample_kind"] == "hard_case"
+    assert record["visibility_state"] == "blurry"
+    assert record["full_frame_retained"] is True
+
+
+def test_normal_person_capture_remains_detector_positive(tmp_path):
+    collector = _collector(tmp_path)
+
+    records = collector.collect(
+        _frame(),
+        [_detection(class_name="person", track_id=62, box=[0.0, 0.1, 0.48, 0.9], conf=0.92)],
+        captured_at=100.0,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["capture_reason"] == "detected_track"
+    assert record["sample_kind"] == "detector_positive"
+    assert record["visibility_state"] == "full"
+    assert record["full_frame_retained"] is False

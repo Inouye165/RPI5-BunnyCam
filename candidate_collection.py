@@ -83,6 +83,13 @@ class CandidateCollectorConfig:
     min_appearance_delta: float = 0.10
     min_crop_stddev: float = 1.5
     save_full_frame: bool = False
+    bunny_hard_case_min_track_hits: int = 4
+    bunny_hard_case_min_crop_width: int = 72
+    bunny_hard_case_min_crop_height: int = 72
+    bunny_hard_case_min_stddev: float = 0.9
+    bunny_hard_case_conf_max: float = 0.6
+    bunny_rear_aspect_ratio_min: float = 1.15
+    bunny_rear_min_box_area: float = 0.035
 
     # Phase 4 — fallback capture for missed bunny detections.
     fallback_enabled: bool = _env_flag("BUNNYCAM_FALLBACK_CAPTURE", True)
@@ -158,13 +165,17 @@ class CandidateCollector:
                 self._mark_skip("invalid_crop")
                 continue
 
+            route = self._assess_capture_route(det, box, crop)
+
             crop_h, crop_w = crop.shape[:2]
-            if crop_w < self.config.min_crop_width or crop_h < self.config.min_crop_height:
+            if crop_w < route["min_crop_width"] or crop_h < route["min_crop_height"]:
                 self._mark_skip("crop_too_small")
                 continue
 
             quality = self._compute_quality(crop)
-            if quality["pixel_stddev"] < self.config.min_crop_stddev:
+            route = self._finalize_capture_route(route, det, quality)
+
+            if quality["pixel_stddev"] < route["min_crop_stddev"]:
                 self._mark_skip("crop_low_variance")
                 continue
 
@@ -190,6 +201,7 @@ class CandidateCollector:
                 bbox_px=bbox_px,
                 frame_source=frame_source,
                 quality=quality,
+                route=route,
             )
 
             state.saved_count += 1
@@ -279,6 +291,8 @@ class CandidateCollector:
             return None
 
         quality = self._compute_quality(crop)
+        edge_touch = self._bbox_edge_touch(proposal_box)
+        visibility_state = "partial" if edge_touch and any(edge_touch.values()) else "unknown"
         track_id = int(fallback_signal.get("track_id", 0))
         class_name = "cat"  # bunny arrives as cat-class through the alias path
 
@@ -335,9 +349,9 @@ class CandidateCollector:
             "is_rabbit_alias": False,
             "detector_coco_class_id": None,
             "full_frame_retained": True,
-            "bbox_edge_touch": self._bbox_edge_touch(proposal_box),
+            "bbox_edge_touch": edge_touch,
             "sample_kind": "hard_case",
-            "visibility_state": "unknown",
+            "visibility_state": visibility_state,
             "bbox_review_state": "proposal_only",
             "fallback_signal": {
                 "last_cx": round(last_cx, 4),
@@ -423,6 +437,7 @@ class CandidateCollector:
         bbox_px: list[int],
         frame_source: str | None,
         quality: dict[str, float | int | bool | None],
+        route: dict[str, Any],
     ) -> dict[str, Any]:
         date_folder = datetime.fromisoformat(created_at.replace("Z", "+00:00")).strftime("%Y/%m/%d")
         image_dir = os.path.join(self.storage_root, "images", date_folder)
@@ -431,12 +446,13 @@ class CandidateCollector:
 
         os.makedirs(image_dir, exist_ok=True)
         os.makedirs(metadata_dir, exist_ok=True)
-        if self.config.save_full_frame:
+        save_full_frame = bool(self.config.save_full_frame or route["retain_full_frame"])
+        if save_full_frame:
             os.makedirs(frame_dir, exist_ok=True)
 
         crop_path = self._save_image(os.path.join(image_dir, candidate_id), crop_rgb)
         frame_path = None
-        if self.config.save_full_frame:
+        if save_full_frame:
             frame_path = self._save_image(os.path.join(frame_dir, candidate_id), frame_rgb)
 
         raw_class_name = str(det.get("class", "")).strip().lower()
@@ -487,7 +503,12 @@ class CandidateCollector:
             "detector_coco_class_id": det.get("detector_coco_class_id"),
             "full_frame_retained": frame_path is not None,
             "bbox_edge_touch": self._bbox_edge_touch(det.get("box")),
+            "sample_kind": route["sample_kind"],
+            "visibility_state": route["visibility_state"],
+            "bbox_review_state": route["bbox_review_state"],
         }
+
+        metadata["capture_reason"] = route["capture_reason"]
 
         metadata_path = os.path.join(metadata_dir, f"{candidate_id}.json")
         with open(metadata_path, "w", encoding="utf-8") as metadata_file:
@@ -567,6 +588,105 @@ class CandidateCollector:
             "pixel_stddev": round(float(gray.std()), 3),
         }
 
+    def _assess_capture_route(
+        self,
+        det: dict[str, Any],
+        box: list[float] | Any,
+        crop_rgb: np.ndarray,
+    ) -> dict[str, Any]:
+        class_name = str(det.get("class", "")).strip().lower()
+        edge_touch = self._bbox_edge_touch(box)
+        box_area, aspect_ratio = self._box_geometry(box)
+        track_hits = int(det.get("track_hits", 0) or 0)
+        confidence = float(det.get("conf", 0.0) or 0.0)
+        is_rabbit_alias = bool(det.get("is_rabbit_alias", False))
+        crop_h, crop_w = crop_rgb.shape[:2]
+
+        route = {
+            "capture_reason": "detected_track",
+            "sample_kind": "detector_positive",
+            "visibility_state": "full",
+            "bbox_review_state": "detector_box_ok",
+            "retain_full_frame": False,
+            "min_crop_width": self.config.min_crop_width,
+            "min_crop_height": self.config.min_crop_height,
+            "min_crop_stddev": self.config.min_crop_stddev,
+            "edge_touch": edge_touch,
+            "box_area": box_area,
+            "aspect_ratio": aspect_ratio,
+        }
+
+        if class_name != "cat":
+            return route
+
+        any_edge_touch = bool(edge_touch and any(edge_touch.values()))
+        low_confidence_alias = is_rabbit_alias and confidence <= self.config.bunny_hard_case_conf_max
+        small_crop = (
+            crop_w < self.config.min_crop_width
+            or crop_h < self.config.min_crop_height
+        )
+        rear_view_like = (
+            track_hits >= self.config.bunny_hard_case_min_track_hits
+            and box_area >= self.config.bunny_rear_min_box_area
+            and aspect_ratio >= self.config.bunny_rear_aspect_ratio_min
+            and not any_edge_touch
+            and confidence <= max(self.config.bunny_hard_case_conf_max, 0.75)
+        )
+        obstructed_like = (
+            track_hits >= self.config.bunny_hard_case_min_track_hits
+            and not any_edge_touch
+            and box_area < self.config.bunny_rear_min_box_area
+            and (is_rabbit_alias or confidence <= self.config.bunny_hard_case_conf_max)
+        )
+
+        if not any((any_edge_touch, low_confidence_alias, rear_view_like, obstructed_like, small_crop)):
+            return route
+
+        route.update({
+            "sample_kind": "hard_case",
+            "retain_full_frame": True,
+            "min_crop_width": self.config.bunny_hard_case_min_crop_width,
+            "min_crop_height": self.config.bunny_hard_case_min_crop_height,
+            "min_crop_stddev": self.config.bunny_hard_case_min_stddev,
+        })
+
+        if any_edge_touch:
+            route["capture_reason"] = "detected_partial_edge"
+            route["visibility_state"] = "partial"
+        elif rear_view_like:
+            route["capture_reason"] = "detected_low_confidence_alias" if low_confidence_alias else "detected_track"
+            route["visibility_state"] = "rear_view"
+        elif obstructed_like:
+            route["capture_reason"] = "detected_low_confidence_alias" if low_confidence_alias else "detected_track"
+            route["visibility_state"] = "obstructed"
+        elif low_confidence_alias:
+            route["capture_reason"] = "detected_low_confidence_alias"
+
+        return route
+
+    def _finalize_capture_route(
+        self,
+        route: dict[str, Any],
+        det: dict[str, Any],
+        quality: dict[str, float | int | bool | None],
+    ) -> dict[str, Any]:
+        class_name = str(det.get("class", "")).strip().lower()
+        if class_name != "cat" or route["sample_kind"] != "hard_case":
+            return route
+
+        edge_touch = route.get("edge_touch")
+        any_edge_touch = bool(edge_touch and any(edge_touch.values()))
+        low_detail = float(quality.get("pixel_stddev", 0.0) or 0.0) < self.config.min_crop_stddev
+        if low_detail:
+            route["min_crop_stddev"] = self.config.bunny_hard_case_min_stddev
+            if any_edge_touch:
+                route["visibility_state"] = "partial"
+            elif route["visibility_state"] == "full":
+                route["visibility_state"] = "blurry"
+                if bool(det.get("is_rabbit_alias", False)):
+                    route["capture_reason"] = "detected_low_confidence_alias"
+        return route
+
     def _appearance_signature(self, crop_rgb: np.ndarray) -> np.ndarray:
         gray = crop_rgb.mean(axis=2).astype(np.float32) / 255.0
         ys = np.linspace(0, gray.shape[0] - 1, num=8, dtype=int)
@@ -590,6 +710,17 @@ class CandidateCollector:
         area_delta = abs(area_curr - area_prev) / max(area_curr, area_prev, 1e-6)
         shape_delta = max(abs(prev_w - curr_w), abs(prev_h - curr_h))
         return max(centre_delta, area_delta, shape_delta)
+
+    @staticmethod
+    def _box_geometry(box: list[float] | Any) -> tuple[float, float]:
+        if not isinstance(box, list) or len(box) != 4:
+            return 0.0, 0.0
+        x1, y1, x2, y2 = (float(v) for v in box)
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        if height <= 1e-6:
+            return width * height, 0.0
+        return width * height, width / height
 
     @staticmethod
     def _bbox_edge_touch(
