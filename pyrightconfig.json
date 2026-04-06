@@ -1,0 +1,31 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "*.py",
+    "camera_backends",
+    "tools",
+    "tests"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/.*",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "data",
+    "logs",
+    "snapshots",
+    "recordings",
+    "recordings_mp4",
+    "htmlcov"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportMissingModuleSource": "warning",
+  "reportUnusedImport": "warning",
+  "reportUnusedVariable": "warning"
+}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# pyright: reportAttributeAccessIssue=false
+
 import os
 import threading
 import time
@@ -50,6 +52,7 @@ class LaptopCameraBackend(CameraBackend):
 
     def _rotate_bgr(self, frame_bgr):
         cv2 = self._cv2
+        assert cv2 is not None
         if self.rotation == 90:
             return cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
         if self.rotation == 180:
@@ -60,6 +63,7 @@ class LaptopCameraBackend(CameraBackend):
 
     def _prepare_preview_frame(self, frame_bgr):
         cv2 = self._cv2
+        assert cv2 is not None
         preview_size = self.preview_stream_size or self._main_size
         frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
         if frame_size == preview_size:
@@ -68,6 +72,7 @@ class LaptopCameraBackend(CameraBackend):
 
     def _encode_preview_frame(self, frame_bgr):
         cv2 = self._cv2
+        assert cv2 is not None
         preview_bgr = self._prepare_preview_frame(frame_bgr)
         return cv2.imencode(
             ".jpg",
@@ -78,6 +83,7 @@ class LaptopCameraBackend(CameraBackend):
     def _capture_loop(self) -> None:
         cv2 = self._cv2
         assert cv2 is not None
+        assert self._capture is not None
 
         # Pace expensive JPEG encode to the effective preview FPS.
         # Camera reads continue at full speed to drain the webcam buffer

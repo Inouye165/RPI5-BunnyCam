@@ -79,7 +79,7 @@ def main() -> int:
     train_detector_parser.add_argument("--stamp", default=None, help="Run timestamp stamp")
     train_detector_parser.add_argument("--device", default=None, help="Device override (e.g., 'cpu', '0', 'cuda')")
 
-    detector_profiles_parser = subparsers.add_parser("detector-profiles", help="List available detector training profiles")
+    subparsers.add_parser("detector-profiles", help="List available detector training profiles")
 
     detector_runs_parser = subparsers.add_parser("detector-runs", help="List detector training runs")
     detector_runs_parser.add_argument("--limit", type=int, default=None, help="Limit number of runs shown")

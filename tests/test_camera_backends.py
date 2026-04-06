@@ -1,4 +1,5 @@
-# pylint: disable=protected-access
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+# pylint: disable=protected-access,unused-argument
 
 import importlib
 import sys

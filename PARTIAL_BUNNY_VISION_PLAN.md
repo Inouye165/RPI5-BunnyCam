@@ -627,7 +627,7 @@ capability should land with the same clarity.
 - [x] Phase 2 — Instrumentation and data-capture groundwork
 - [x] Phase 3 — Review and label schema expansion
 - [x] Phase 4 — Missed-detection fallback capture path
-- [ ] Phase 5 — Quality gate and continuity logic
+- [x] Phase 5 — Quality gate and continuity logic
 - [ ] Phase 6 — Dataset packaging and training workflow updates
 - [ ] Phase 7 — Inference rollout, thresholds, observability, and tuning
 - [ ] Phase 8 — Cleanup, documentation, and future follow-ons
@@ -660,10 +660,10 @@ capability should land with the same clarity.
 - [x] Add tests for fallback activation and suppression
 
 #### Phase 5
-- [ ] Add edge-touch / truncation heuristics
-- [ ] Add bunny-aware hard-case quality routing
-- [ ] Preserve generic conservative behavior for unrelated classes
-- [ ] Add tests for partial / blurry / obstructed routing
+- [x] Add edge-touch / truncation heuristics
+- [x] Add bunny-aware hard-case quality routing
+- [x] Preserve generic conservative behavior for unrelated classes
+- [x] Add tests for partial / blurry / obstructed routing
 
 #### Phase 6
 - [ ] Add `"bunny"` support to detection packaging
@@ -697,6 +697,7 @@ Update this table after each meaningful step.
 | 2026-04-05 | Phase 2 | Instrumentation groundwork. detect.py now exposes `is_rabbit_alias` and `detector_coco_class_id` on every detection instead of stripping raw class index. candidate_collection.py bumped metadata to v2 and adds: `capture_reason` ("detected_track"), `is_rabbit_alias`, `detector_coco_class_id`, `full_frame_retained`, `bbox_edge_touch` (per-side dict). Status includes `saved_rabbit_alias_count`. No runtime behavior change; all new fields are metadata-only and backward-safe. | 216 passed (210 existing + 6 new), 0 failed. | Phase 3 must expand SUPPORTED_CLASSES before bunny can become a reviewable/trainable class. Current `full_frame_retained` defaults to False; selective retention caps belong in Phase 4/5. |
 | 2026-04-05 | Phase 3 | Review and label schema expansion. Added `"bunny"` to `SUPPORTED_CLASSES` in review_queue.py and training_dataset.py (`DETECTION_CLASS_IDS["bunny"] = 3`). Added `sample_kind`, `visibility_state`, `bbox_review_state` as review-editable fields with allowed-value enums and `_normalize_enum` validation. `_normalize_candidate` now surfaces Phase 2 fields (`capture_reason`, `is_rabbit_alias`, `detector_coco_class_id`, `full_frame_retained`, `bbox_edge_touch`) with safe defaults for v1 metadata. reviewed_export.py passes Phase 2/3 metadata into export items. Bunny samples now flow through review, export, detection packaging (class ID 3), and identity packaging. All changes additive and backward-safe. | 225 passed (216 existing + 9 new), 0 failed. | Phase 4 should add fallback capture path. `capture_reason` is still always `"detected_track"`; new values should be introduced with new capture paths. The sec_cam.py review API routes do not yet pass `sample_kind`/`visibility_state`/`bbox_review_state` from HTTP to the queue, but the underlying queue supports them; API exposure belongs in a review UI phase. |
 | 2026-04-05 | Phase 4 | Missed-detection fallback capture path. movement_tracker.py gains `get_fallback_signal(dets, now)` returning last-known bunny position when a sticky bunny track is recently lost. candidate_collection.py gains `collect_fallback()` method with 5 config knobs: `fallback_enabled`, `fallback_cooldown_sec=30`, `fallback_max_per_session=20`, `fallback_min_elapsed_sec=2`, `fallback_max_elapsed_sec=60`. Saves full-frame + proposal crop centred on last known position. Tagged with `capture_reason="fallback_recent_bunny_track"`, `sample_kind="hard_case"`, `bbox_review_state="proposal_only"`, `visibility_state="unknown"`, `confidence=0.0`. detect.py worker loop calls fallback path when no cat-class detections present and movement tracker signals a recently-lost bunny. Status exposes `fallback_saved_total` and `fallback_enabled`. Fixed deadlock in initial implementation where `_mark_skip` was called inside held lock. | 234 passed (225 existing + 9 new), 0 failed. | Phase 5 should add quality-gate scoring for hard-case captures. Fallback proposal boxes are unverified (`bbox_review_state="proposal_only"`) and must not be used for training without human review. The `is_rabbit_alias` field on fallback items is `False` because the detection came from the tracker signal, not the YOLO detector alias path. |
+| 2026-04-06 | Phase 5 | Quality gate and continuity logic. candidate_collection.py now keeps a stricter default path for person/dog and normal interior detections while routing bunny-like cat hard cases into richer metadata. Edge-touch boxes become `capture_reason="detected_partial_edge"` with `visibility_state="partial"`; low-confidence rabbit-alias crops can be retained as `sample_kind="hard_case"` with `visibility_state="blurry"`; hard-case detector-positive items retain full-frame images for later annotation. Fallback proposal captures now mark `visibility_state="partial"` when the proposal touches a frame edge. movement_tracker.py adds a short continuity hold so a recently sticky bunny track is not replaced by one weak cat frame before fallback logic gets a chance to act. | Full pytest before change: 234 passed. Full pytest after change: 240 passed (234 existing + 6 new), 0 failed. | Rear-view and obstructed routing remain intentionally heuristic and metadata-only in this phase; no broad classifier or review UI redesign was added. |
 
 ---
 

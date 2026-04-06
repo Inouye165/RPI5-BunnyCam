@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 import io
 from threading import Condition
 
@@ -60,6 +62,8 @@ def gen_frames():
         with output.condition:
             output.condition.wait()
             frame = output.frame
+      if frame is None:
+        continue
         yield (b"--frame\r\n"
                b"Content-Type: image/jpeg\r\n"
                b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" +

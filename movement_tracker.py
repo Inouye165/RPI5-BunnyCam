@@ -26,7 +26,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,12 @@ BUNNY_STITCH_GAP_SEC = 300.0
 
 # Maximum normalised centroid distance to stitch two segments together.
 BUNNY_STITCH_MAX_DIST = 0.25
+
+# When a sticky bunny track briefly disappears, hold continuity for a few
+# seconds rather than switching immediately to a weak replacement track.
+BUNNY_CONTINUITY_HOLD_SEC = 4.0
+BUNNY_SWITCH_MIN_TRACK_HITS = 2
+BUNNY_SWITCH_MIN_CONF = 0.65
 
 # Default calibration: physical inches per one normalised coordinate unit.
 # Override via BUNNYCAM_CALIBRATION_INCHES_PER_NORM env var, or call
@@ -333,7 +339,40 @@ class BunnyMovementTracker:
                 best_score = score
                 best_det = det
 
+        if (
+            active is not None
+            and active.is_sticky_bunny
+            and best_det is not None
+            and self._should_hold_sticky_bunny(best_det, active, now)
+        ):
+            return None
+
         return best_det
+
+    def _should_hold_sticky_bunny(
+        self,
+        det: dict[str, Any],
+        active: BunnyTrackState,
+        now: float,
+    ) -> bool:
+        """Conservatively preserve bunny continuity through one weak frame."""
+        if det.get("track_id") == active.track_id:
+            return False
+
+        elapsed = now - active.last_seen
+        if elapsed <= 0 or elapsed > BUNNY_CONTINUITY_HOLD_SEC:
+            return False
+
+        track_hits = int(det.get("track_hits", 0) or 0)
+        confidence = float(det.get("conf", 0.0) or 0.0)
+        cx, cy = self._centroid(det.get("box", [0, 0, 0, 0]))
+        dist = self._dist(active.last_cx, active.last_cy, cx, cy)
+
+        return (
+            track_hits < BUNNY_SWITCH_MIN_TRACK_HITS
+            or confidence < BUNNY_SWITCH_MIN_CONF
+            or dist > BUNNY_STITCH_MAX_DIST
+        )
 
     def _update_identity(
         self,
@@ -402,7 +441,7 @@ class BunnyMovementTracker:
             self._current_segment.ended is not None
         ) or (
             track_state.track_id != self._current_segment.track_id
-            and not self._should_stitch(track_state, cx, cy, now)
+            and not self._should_stitch(cx, cy, now)
         ):
             self._start_new_segment(track_state.track_id, now, cx, cy)
             return
@@ -418,7 +457,6 @@ class BunnyMovementTracker:
 
     def _should_stitch(
         self,
-        track_state: BunnyTrackState,
         cx: float,
         cy: float,
         now: float,

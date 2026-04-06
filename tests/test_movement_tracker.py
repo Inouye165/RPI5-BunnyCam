@@ -10,24 +10,21 @@ Tests verify:
 - Edge cases: no detections, non-bunny only, jitter suppression
 """
 
+# pyright: reportOptionalMemberAccess=false
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-import pytest
-
 from movement_tracker import (
+    BUNNY_CONTINUITY_HOLD_SEC,
     BUNNY_STICKY_THRESHOLD,
+    BUNNY_SWITCH_MIN_CONF,
     BUNNY_STITCH_GAP_SEC,
-    BUNNY_STITCH_MAX_DIST,
-    MOVE_THRESHOLD,
     SEGMENT_GAP_SEC,
     BunnyMovementTracker,
-    BunnyTrackState,
-    PositionEntry,
-    TrackSegment,
 )
 
 
@@ -242,6 +239,48 @@ class TestTrackStitching:
         # Should be a fresh track (not stitched — far away).
         assert t._active_track.track_id == 2
         assert t._active_track.is_sticky_bunny is False
+
+
+class TestFallbackContinuity:
+    def test_recent_sticky_bunny_holds_through_one_weak_replacement_frame(self, tmp_path):
+        t = _tracker(tmp_path)
+        for i in range(BUNNY_STICKY_THRESHOLD + 1):
+            t.update([_det(track_id=1, box=[0.3, 0.3, 0.5, 0.5])], now=1000.0 + i)
+
+        weak_replacement = _det(
+            track_id=9,
+            box=[0.72, 0.12, 0.9, 0.32],
+            track_hits=1,
+            conf=BUNNY_SWITCH_MIN_CONF - 0.1,
+        )
+        weak_time = 1000.0 + BUNNY_STICKY_THRESHOLD + 2
+
+        t.update([weak_replacement], now=weak_time)
+        fallback = t.get_fallback_signal([weak_replacement], now=weak_time)
+
+        assert t._active_track is not None
+        assert t._active_track.track_id == 1
+        assert fallback is not None
+        assert fallback["track_id"] == 1
+
+    def test_strong_replacement_track_can_take_over_after_hold_window(self, tmp_path):
+        t = _tracker(tmp_path)
+        for i in range(BUNNY_STICKY_THRESHOLD + 1):
+            t.update([_det(track_id=1, box=[0.3, 0.3, 0.5, 0.5])], now=1000.0 + i)
+
+        strong_time = 1000.0 + BUNNY_STICKY_THRESHOLD + BUNNY_CONTINUITY_HOLD_SEC + 1
+        strong_replacement = _det(
+            track_id=4,
+            box=[0.31, 0.31, 0.53, 0.53],
+            track_hits=3,
+            conf=max(BUNNY_SWITCH_MIN_CONF + 0.1, 0.9),
+        )
+
+        t.update([strong_replacement], now=strong_time)
+
+        assert t._active_track is not None
+        assert t._active_track.track_id == 4
+        assert t.get_fallback_signal([strong_replacement], now=strong_time) is None
 
     def test_new_track_after_long_gap_does_not_stitch(self, tmp_path):
         t = _tracker(tmp_path)
