@@ -84,6 +84,13 @@ class CandidateCollectorConfig:
     min_crop_stddev: float = 1.5
     save_full_frame: bool = False
 
+    # Phase 4 — fallback capture for missed bunny detections.
+    fallback_enabled: bool = _env_flag("BUNNYCAM_FALLBACK_CAPTURE", True)
+    fallback_cooldown_sec: float = 30.0
+    fallback_max_per_session: int = 20
+    fallback_min_elapsed_sec: float = 2.0
+    fallback_max_elapsed_sec: float = 60.0
+
 
 @dataclass(slots=True)
 class _TrackSaveState:
@@ -104,8 +111,12 @@ class CandidateCollector:
         self._track_states: dict[tuple[str, int], _TrackSaveState] = {}
         self._saved_total = 0
         self._saved_by_class = {name: 0 for name in self.config.target_classes}
+        self._saved_rabbit_alias_count = 0
         self._skipped_reasons: dict[str, int] = {}
         self._last_saved_at: str | None = None
+        # Phase 4 — fallback capture state.
+        self._fallback_saved_total = 0
+        self._fallback_last_saved_at: float = 0.0
 
     def collect(
         self,
@@ -190,6 +201,8 @@ class CandidateCollector:
             with self._lock:
                 self._saved_total += 1
                 self._saved_by_class[class_name] = self._saved_by_class.get(class_name, 0) + 1
+                if det.get("is_rabbit_alias"):
+                    self._saved_rabbit_alias_count += 1
                 self._last_saved_at = created_at
 
             logger.info(
@@ -202,6 +215,153 @@ class CandidateCollector:
             saved_records.append(record)
 
         return saved_records
+
+    def collect_fallback(
+        self,
+        frame_rgb: np.ndarray | None,
+        fallback_signal: dict[str, Any],
+        *,
+        frame_source: str | None = None,
+        captured_at: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Save a fallback candidate when the bunny was recently lost.
+
+        Phase 4: conservative fallback capture.  Saves a full-frame image
+        plus a proposal crop centred on the last known bunny position.
+        Tags the candidate with hard-case metadata so it is never confused
+        with a normal detector-positive sample.
+
+        Returns the saved metadata dict, or None if gated out.
+        """
+        if not self.config.enabled or not self.config.fallback_enabled:
+            return None
+        if frame_rgb is None or frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3:
+            return None
+        if not fallback_signal:
+            return None
+
+        timestamp = float(captured_at if captured_at is not None else time.time())
+
+        # ── throttle / cap gates ──────────────────────────────────────
+        gate_reason: str | None = None
+        with self._lock:
+            if self._fallback_saved_total >= self.config.fallback_max_per_session:
+                gate_reason = "fallback_session_limit"
+            elif timestamp - self._fallback_last_saved_at < self.config.fallback_cooldown_sec:
+                gate_reason = "fallback_cooldown"
+        if gate_reason is not None:
+            self._mark_skip(gate_reason)
+            return None
+
+        # ── validate signal timing ────────────────────────────────────
+        signal_elapsed = float(fallback_signal.get("elapsed_sec", 0))
+        if signal_elapsed < self.config.fallback_min_elapsed_sec:
+            self._mark_skip("fallback_too_soon")
+            return None
+        if signal_elapsed > self.config.fallback_max_elapsed_sec:
+            self._mark_skip("fallback_too_stale")
+            return None
+
+        # ── proposal crop from last known position ────────────────────
+        last_cx = float(fallback_signal.get("last_cx", 0.5))
+        last_cy = float(fallback_signal.get("last_cy", 0.5))
+        proposal_half = 0.12  # ~24% of frame width/height
+        proposal_box = [
+            max(0.0, last_cx - proposal_half),
+            max(0.0, last_cy - proposal_half),
+            min(1.0, last_cx + proposal_half),
+            min(1.0, last_cy + proposal_half),
+        ]
+
+        crop, bbox_px = self._extract_crop(frame_rgb, proposal_box)
+        if crop is None or bbox_px is None:
+            self._mark_skip("fallback_invalid_crop")
+            return None
+
+        quality = self._compute_quality(crop)
+        track_id = int(fallback_signal.get("track_id", 0))
+        class_name = "cat"  # bunny arrives as cat-class through the alias path
+
+        candidate_id, created_at = self._make_candidate_id(
+            f"fallback_{class_name}", track_id, self._fallback_saved_total + 1, timestamp,
+        )
+
+        # Save both crop and full frame for fallback items.
+        date_folder = datetime.fromisoformat(created_at.replace("Z", "+00:00")).strftime("%Y/%m/%d")
+        image_dir = os.path.join(self.storage_root, "images", date_folder)
+        metadata_dir = os.path.join(self.storage_root, "metadata", date_folder)
+        frame_dir = os.path.join(self.storage_root, "frames", date_folder)
+        os.makedirs(image_dir, exist_ok=True)
+        os.makedirs(metadata_dir, exist_ok=True)
+        os.makedirs(frame_dir, exist_ok=True)
+
+        crop_path = self._save_image(os.path.join(image_dir, candidate_id), crop)
+        frame_path = self._save_image(os.path.join(frame_dir, candidate_id), frame_rgb)
+
+        metadata = {
+            "version": 2,
+            "candidate_id": candidate_id,
+            "timestamp": created_at,
+            "class_name": class_name,
+            "raw_class_name": class_name,
+            "identity_label": None,
+            "review_state": "unreviewed",
+            "reviewed_at": None,
+            "corrected_class_name": None,
+            "track_id": track_id,
+            "track_hits": int(fallback_signal.get("bunny_hits", 0)),
+            "bbox_norm": [round(v, 4) for v in proposal_box],
+            "bbox_pixels": bbox_px,
+            "confidence": 0.0,
+            "crop_path": self._relative_path(crop_path),
+            "frame_path": self._relative_path(frame_path),
+            "source": {
+                "camera_backend": os.getenv("CAMERA_BACKEND") or "auto",
+                "frame_source": frame_source,
+                "frame_width": int(frame_rgb.shape[1]),
+                "frame_height": int(frame_rgb.shape[0]),
+            },
+            "quality": {
+                **quality,
+                "face_visible": None,
+            },
+            "tracking": {
+                "display_class": None,
+                "display_label": None,
+                "display_class_reason": "fallback_recent_bunny_track",
+            },
+            # Phase 2/3 metadata — explicit hard-case tagging.
+            "capture_reason": "fallback_recent_bunny_track",
+            "is_rabbit_alias": False,
+            "detector_coco_class_id": None,
+            "full_frame_retained": True,
+            "bbox_edge_touch": self._bbox_edge_touch(proposal_box),
+            "sample_kind": "hard_case",
+            "visibility_state": "unknown",
+            "bbox_review_state": "proposal_only",
+            "fallback_signal": {
+                "last_cx": round(last_cx, 4),
+                "last_cy": round(last_cy, 4),
+                "elapsed_sec": round(signal_elapsed, 2),
+                "bunny_hits": int(fallback_signal.get("bunny_hits", 0)),
+            },
+        }
+
+        metadata_path = os.path.join(metadata_dir, f"{candidate_id}.json")
+        with open(metadata_path, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, indent=2, sort_keys=True)
+
+        with self._lock:
+            self._fallback_saved_total += 1
+            self._fallback_last_saved_at = timestamp
+            self._saved_total += 1
+            self._last_saved_at = created_at
+
+        logger.info(
+            "candidate: fallback saved %s track=%s elapsed=%.1fs",
+            candidate_id, track_id, signal_elapsed,
+        )
+        return metadata
 
     def get_status(self) -> dict[str, Any]:
         """Return lightweight collector status for debug endpoints."""
@@ -223,6 +383,9 @@ class CandidateCollector:
                 "min_box_delta": self.config.min_box_delta,
                 "min_appearance_delta": self.config.min_appearance_delta,
                 "save_full_frame": self.config.save_full_frame,
+                "saved_rabbit_alias_count": self._saved_rabbit_alias_count,
+                "fallback_enabled": bool(self.config.fallback_enabled),
+                "fallback_saved_total": self._fallback_saved_total,
             }
 
     def _mark_skip(self, reason: str) -> None:
@@ -288,7 +451,7 @@ class CandidateCollector:
             identity_label = label.strip()
 
         metadata = {
-            "version": 1,
+            "version": 2,
             "candidate_id": candidate_id,
             "timestamp": created_at,
             "class_name": class_name,
@@ -319,6 +482,11 @@ class CandidateCollector:
                 "display_label": det.get("display_label"),
                 "display_class_reason": det.get("display_class_reason"),
             },
+            "capture_reason": "detected_track",
+            "is_rabbit_alias": bool(det.get("is_rabbit_alias", False)),
+            "detector_coco_class_id": det.get("detector_coco_class_id"),
+            "full_frame_retained": frame_path is not None,
+            "bbox_edge_touch": self._bbox_edge_touch(det.get("box")),
         }
 
         metadata_path = os.path.join(metadata_dir, f"{candidate_id}.json")
@@ -422,3 +590,19 @@ class CandidateCollector:
         area_delta = abs(area_curr - area_prev) / max(area_curr, area_prev, 1e-6)
         shape_delta = max(abs(prev_w - curr_w), abs(prev_h - curr_h))
         return max(centre_delta, area_delta, shape_delta)
+
+    @staticmethod
+    def _bbox_edge_touch(
+        box: list[float] | Any,
+        threshold: float = 0.02,
+    ) -> dict[str, bool] | None:
+        """Return which frame edges a normalized bbox touches, if any."""
+        if not isinstance(box, list) or len(box) != 4:
+            return None
+        x1, y1, x2, y2 = (float(v) for v in box)
+        return {
+            "left": x1 <= threshold,
+            "top": y1 <= threshold,
+            "right": x2 >= 1.0 - threshold,
+            "bottom": y2 >= 1.0 - threshold,
+        }

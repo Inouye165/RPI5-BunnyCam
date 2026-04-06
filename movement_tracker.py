@@ -498,6 +498,40 @@ class BunnyMovementTracker:
             self._persist_snapshot()
             self._last_persist_time = time.time()
 
+    def get_fallback_signal(self, detections: list[dict[str, Any]], now: float | None = None) -> dict[str, Any] | None:
+        """Return a fallback signal when a sticky bunny track was recently lost.
+
+        Returns a dict with the last known bunny position if ALL of:
+        - There is an active sticky bunny track.
+        - The bunny was NOT found in the current detections.
+        - The gap since last seen is within BUNNY_STITCH_GAP_SEC.
+
+        Returns None otherwise.  Phase 4 — conservative fallback only.
+        """
+        now = now or time.time()
+        with self._lock:
+            active = self._active_track
+            if active is None or not active.is_sticky_bunny:
+                return None
+
+            # Check if bunny is still detected this frame.
+            bunny = self._pick_bunny(detections, now)
+            if bunny is not None:
+                return None
+
+            elapsed = now - active.last_seen
+            if elapsed <= 0 or elapsed > BUNNY_STITCH_GAP_SEC:
+                return None
+
+            return {
+                "track_id": active.track_id,
+                "last_cx": active.last_cx,
+                "last_cy": active.last_cy,
+                "last_seen": active.last_seen,
+                "elapsed_sec": round(elapsed, 2),
+                "bunny_hits": active.bunny_hits,
+            }
+
     def get_today_summary(self) -> dict[str, Any]:
         """Return a summary of today's movement data."""
         with self._lock:

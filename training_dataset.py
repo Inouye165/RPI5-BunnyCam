@@ -13,7 +13,7 @@ from typing import Any
 
 from review_queue import CandidateReviewQueue
 
-SUPPORTED_CLASSES = ("person", "dog", "cat")
+SUPPORTED_CLASSES = ("person", "dog", "cat", "bunny")
 DETECTION_CLASS_IDS = {name: index for index, name in enumerate(SUPPORTED_CLASSES)}
 VAL_SPLIT_PERCENT = 20
 
