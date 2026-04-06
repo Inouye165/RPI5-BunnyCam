@@ -185,7 +185,24 @@ def test_status_route_includes_detection_state(monkeypatch):
                 "thresholds": {"max_distance": 0.22, "min_margin": 0.06},
                 "recent_match": {"matched": True, "identity_label": "Dobby", "reason": "matched"},
             },
-            "candidate_collection": {"enabled": True, "saved_total": 2, "saved_by_class": {"person": 2}},
+            "candidate_collection": {
+                "enabled": True,
+                "saved_total": 2,
+                "saved_by_class": {"person": 2},
+                "saved_by_capture_reason": {"detected_track": 2},
+                "saved_by_sample_kind": {"detector_positive": 2},
+                "bunny_rollout": {
+                    "detector_positive_cat_total": 0,
+                    "hard_case_cat_total": 0,
+                    "fallback_capture_total": 0,
+                    "rabbit_alias_capture_total": 0,
+                    "full_frame_retained_total": 0,
+                },
+                "rollout_config": {
+                    "bunny_hard_case_enabled": True,
+                    "fallback_enabled": True,
+                },
+            },
             "model": "yolov8n",
         }
     ))
@@ -203,6 +220,8 @@ def test_status_route_includes_detection_state(monkeypatch):
     assert payload["pet_identity_matching"]["enabled"] is True
     assert payload["pet_identity_matching"]["pet_sample_counts"]["Dobby"] == 3
     assert payload["candidate_collection"]["saved_total"] == 2
+    assert payload["candidate_collection"]["saved_by_capture_reason"] == {"detected_track": 2}
+    assert payload["candidate_collection"]["rollout_config"]["bunny_hard_case_enabled"] is True
     assert payload["app_version"]["display"] == "v0.3.0 (main@abc1234)"
     assert payload["motion"] is False
 
@@ -254,6 +273,15 @@ def test_candidate_collection_status_route(monkeypatch):
                 "enabled": True,
                 "saved_total": 4,
                 "saved_by_class": {"person": 2, "cat": 1, "dog": 1},
+                "saved_by_capture_reason": {"detected_track": 2, "fallback_recent_bunny_track": 1},
+                "saved_by_sample_kind": {"detector_positive": 3, "hard_case": 1},
+                "bunny_rollout": {
+                    "detector_positive_cat_total": 1,
+                    "hard_case_cat_total": 1,
+                    "fallback_capture_total": 1,
+                    "rabbit_alias_capture_total": 1,
+                    "full_frame_retained_total": 2,
+                },
             },
             "model": "yolov8n",
         }
@@ -268,6 +296,8 @@ def test_candidate_collection_status_route(monkeypatch):
     assert payload["enabled"] is True
     assert payload["saved_total"] == 4
     assert payload["saved_by_class"]["dog"] == 1
+    assert payload["saved_by_capture_reason"]["fallback_recent_bunny_track"] == 1
+    assert payload["bunny_rollout"]["hard_case_cat_total"] == 1
 
 
 def _make_review_item(**overrides):
@@ -464,6 +494,24 @@ def test_review_training_dataset_status_route(monkeypatch):
             "generated_at": "2026-03-26T07:20:00Z",
             "package_name": "20260326_072000",
             "training_root": os.path.join(_base, "data", "training"),
+            "reviewed_summary": {
+                "approved_reviewed_count": 2,
+                "class_counts": {"dog": 1, "person": 1},
+                "sample_kind_counts": {"detector_positive": 1, "hard_case": 1},
+                "visibility_state_counts": {"full": 1, "partial": 1},
+                "bbox_review_state_counts": {"detector_box_ok": 1, "proposal_only": 1},
+                "capture_reason_counts": {"detected_track": 1, "fallback_recent_bunny_track": 1},
+                "detection_recommendation_counts": {
+                    "approved_detector_positive": 1,
+                    "hard_case_requires_explicit_detector_promotion": 1,
+                },
+                "identity_recommendation_counts": {
+                    "approved_identity_sample": 1,
+                    "hard_case_identity_blocked": 1,
+                },
+                "annotation_recommendation_counts": {"bbox_proposal_only": 1},
+                "packaged_counts": {"detection": 2, "identity": 1, "annotation": 1},
+            },
             "detection": {
                 "dataset_path": os.path.join(_base, "data", "training", "detection", "20260326_072000"),
                 "manifest_path": os.path.join(_base, "data", "training", "detection", "20260326_072000", "manifest.json"),
@@ -491,6 +539,8 @@ def test_review_training_dataset_status_route(monkeypatch):
     assert payload["package_name"] == "20260326_072000"
     assert payload["detection"]["dataset_path"].startswith("data/training/detection/")
     assert payload["identity"]["identity_counts"] == {"Ron": 1}
+    assert payload["reviewed_summary"]["packaged_counts"] == {"detection": 2, "identity": 1, "annotation": 1}
+    assert payload["reviewed_summary"]["annotation_recommendation_counts"] == {"bbox_proposal_only": 1}
 
 
 def test_review_package_training_datasets_route(monkeypatch):
@@ -502,11 +552,31 @@ def test_review_package_training_datasets_route(monkeypatch):
             "generated_at": "2026-03-26T07:21:00Z",
             "package_name": "20260326_072100",
             "training_root": os.path.join(_base, "data", "training"),
+            "reviewed_summary": {
+                "approved_reviewed_count": 4,
+                "class_counts": {"dog": 2, "person": 2},
+                "sample_kind_counts": {"detector_positive": 3, "hard_case": 1},
+                "visibility_state_counts": {"full": 3, "partial": 1},
+                "bbox_review_state_counts": {"detector_box_ok": 3, "proposal_only": 1},
+                "capture_reason_counts": {"detected_track": 3, "fallback_recent_bunny_track": 1},
+                "detection_recommendation_counts": {
+                    "approved_detector_positive": 3,
+                    "hard_case_requires_explicit_detector_promotion": 1,
+                },
+                "identity_recommendation_counts": {
+                    "approved_identity_sample": 3,
+                    "hard_case_identity_blocked": 1,
+                },
+                "annotation_recommendation_counts": {"bbox_proposal_only": 1},
+                "packaged_counts": {"detection": 3, "identity": 3, "annotation": 1},
+            },
             "detection": {
                 "dataset_path": os.path.join(_base, "data", "training", "detection", "20260326_072100"),
                 "manifest_path": os.path.join(_base, "data", "training", "detection", "20260326_072100", "manifest.json"),
                 "item_count": 4,
                 "class_counts": {"dog": 2, "person": 2},
+                "sample_kind_counts": {"detector_positive": 4},
+                "capture_reason_counts": {"detected_track": 4},
                 "validation": {"error_count": 0, "errors": []},
             },
             "identity": {
@@ -514,6 +584,23 @@ def test_review_package_training_datasets_route(monkeypatch):
                 "manifest_path": os.path.join(_base, "data", "training", "identity", "20260326_072100", "manifest.json"),
                 "item_count": 3,
                 "identity_counts": {"Dobby": 2, "Ron": 1},
+                "packaging_decision_counts": {"approved_identity_sample": 3},
+                "capture_reason_counts": {"detected_track": 3},
+                "sample_kind_counts": {"detector_positive": 3},
+                "visibility_state_counts": {"full": 3},
+                "bbox_review_state_counts": {"detector_box_ok": 3},
+                "validation": {"error_count": 0, "errors": []},
+            },
+            "annotation": {
+                "dataset_path": os.path.join(_base, "data", "training", "annotation", "20260326_072100"),
+                "manifest_path": os.path.join(_base, "data", "training", "annotation", "20260326_072100", "manifest.json"),
+                "item_count": 1,
+                "class_counts": {"bunny": 1},
+                "sample_kind_counts": {"hard_case": 1},
+                "visibility_state_counts": {"partial": 1},
+                "bbox_review_state_counts": {"proposal_only": 1},
+                "capture_reason_counts": {"fallback_recent_bunny_track": 1},
+                "annotation_reason_counts": {"bbox_proposal_only": 1},
                 "validation": {"error_count": 0, "errors": []},
             },
         }
@@ -528,6 +615,8 @@ def test_review_package_training_datasets_route(monkeypatch):
     assert payload["ok"] is True
     assert payload["detection"]["item_count"] == 4
     assert payload["identity"]["dataset_path"].startswith("data/training/identity/")
+    assert payload["reviewed_summary"]["detection_recommendation_counts"]["approved_detector_positive"] == 3
+    assert payload["annotation"]["annotation_reason_counts"] == {"bbox_proposal_only": 1}
 
 
 def test_detections_when_detect_module_unavailable(monkeypatch):

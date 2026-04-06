@@ -94,6 +94,14 @@ def _normalize_review_flag(value: Any, default: str) -> str:
     return normalized or default
 
 
+def _count_packaging_recommendations(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for item in items:
+        packaging = _packaging_policy(item)
+        counter[str(packaging.get(key) or "unknown")] += 1
+    return dict(sorted(counter.items()))
+
+
 def _packaging_policy(item: dict[str, Any]) -> dict[str, str | bool]:
     sample_kind = _normalize_review_flag(item.get("sample_kind"), "detector_positive")
     visibility_state = _normalize_review_flag(item.get("visibility_state"), "unknown")
@@ -182,6 +190,12 @@ class TrainingDatasetPackager:
         detection_payload = self._package_detection_dataset(approved_items, stamp=stamp, version_info=version_info or {})
         identity_payload = self._package_identity_dataset(approved_items, stamp=stamp, version_info=version_info or {})
         annotation_payload = self._package_annotation_dataset(approved_items, stamp=stamp, version_info=version_info or {})
+        reviewed_summary = self._reviewed_summary(approved_items)
+        reviewed_summary["packaged_counts"] = {
+            "detection": int(detection_payload.get("item_count", 0) or 0),
+            "identity": int(identity_payload.get("item_count", 0) or 0),
+            "annotation": int(annotation_payload.get("item_count", 0) or 0),
+        }
 
         payload = {
             "generated_at": _iso_now(),
@@ -189,6 +203,7 @@ class TrainingDatasetPackager:
             "training_root": self.training_root,
             "version": version_info or {},
             "source_rule": "approved_reviewed_only",
+            "reviewed_summary": reviewed_summary,
             "detection": detection_payload,
             "identity": identity_payload,
             "annotation": annotation_payload,
@@ -203,12 +218,15 @@ class TrainingDatasetPackager:
                 "package_name": None,
                 "training_root": self.training_root,
                 "source_rule": "approved_reviewed_only",
+                "reviewed_summary": self._empty_reviewed_summary(),
                 "detection": self._empty_status("detection"),
                 "identity": self._empty_status("identity"),
+                "annotation": self._empty_status("annotation"),
             }
         payload = _json_read(self.status_path)
         payload.setdefault("training_root", self.training_root)
         payload.setdefault("source_rule", "approved_reviewed_only")
+        payload.setdefault("reviewed_summary", self._empty_reviewed_summary())
         payload.setdefault("detection", self._empty_status("detection"))
         payload.setdefault("identity", self._empty_status("identity"))
         payload.setdefault("annotation", self._empty_status("annotation"))
@@ -505,6 +523,12 @@ class TrainingDatasetPackager:
             "skipped_count": len(skipped),
             "split_counts": manifest["split_counts"],
             "class_counts": manifest["class_counts"],
+            "sample_kind_counts": manifest["sample_kind_counts"],
+            "visibility_state_counts": manifest["visibility_state_counts"],
+            "bbox_review_state_counts": manifest["bbox_review_state_counts"],
+            "capture_reason_counts": manifest["capture_reason_counts"],
+            "packaging_decision_counts": manifest["packaging_decision_counts"],
+            "skipped_reason_counts": manifest["skipped_reason_counts"],
             "validation": validation,
             "skipped": skipped,
         }
@@ -639,6 +663,12 @@ class TrainingDatasetPackager:
             "split_counts": manifest["split_counts"],
             "class_counts": manifest["class_counts"],
             "identity_counts": manifest["identity_counts"],
+            "sample_kind_counts": manifest["sample_kind_counts"],
+            "visibility_state_counts": manifest["visibility_state_counts"],
+            "bbox_review_state_counts": manifest["bbox_review_state_counts"],
+            "capture_reason_counts": manifest["capture_reason_counts"],
+            "packaging_decision_counts": manifest["packaging_decision_counts"],
+            "skipped_reason_counts": manifest["skipped_reason_counts"],
             "validation": validation,
             "skipped": skipped,
         }
@@ -755,9 +785,27 @@ class TrainingDatasetPackager:
             "item_count": len(items),
             "skipped_count": len(skipped),
             "class_counts": manifest["class_counts"],
+            "sample_kind_counts": manifest["sample_kind_counts"],
+            "visibility_state_counts": manifest["visibility_state_counts"],
+            "bbox_review_state_counts": manifest["bbox_review_state_counts"],
+            "capture_reason_counts": manifest["capture_reason_counts"],
             "annotation_reason_counts": manifest["annotation_reason_counts"],
+            "skipped_reason_counts": manifest["skipped_reason_counts"],
             "validation": validation,
             "skipped": skipped,
+        }
+
+    def _reviewed_summary(self, approved_items: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "approved_reviewed_count": len(approved_items),
+            "class_counts": _count_by(approved_items, "effective_class_name"),
+            "sample_kind_counts": _count_by(approved_items, "sample_kind"),
+            "visibility_state_counts": _count_by(approved_items, "visibility_state"),
+            "bbox_review_state_counts": _count_by(approved_items, "bbox_review_state"),
+            "capture_reason_counts": _count_by(approved_items, "capture_reason"),
+            "detection_recommendation_counts": _count_packaging_recommendations(approved_items, "detection_reason"),
+            "identity_recommendation_counts": _count_packaging_recommendations(approved_items, "identity_reason"),
+            "annotation_recommendation_counts": _count_packaging_recommendations(approved_items, "annotation_reason"),
         }
 
     def _identity_splits(self, identity_label: str, samples: list[dict[str, Any]]) -> dict[str, str]:
@@ -796,11 +844,37 @@ class TrainingDatasetPackager:
             "skipped_count": 0,
             "split_counts": {},
             "class_counts": {},
+            "identity_counts": {},
+            "sample_kind_counts": {},
+            "visibility_state_counts": {},
+            "bbox_review_state_counts": {},
+            "capture_reason_counts": {},
+            "packaging_decision_counts": {},
+            "annotation_reason_counts": {},
+            "skipped_reason_counts": {},
             "validation": {
                 "dataset_type": dataset_type,
                 "dataset_path": None,
                 "item_count": 0,
                 "error_count": 0,
                 "errors": [],
+            },
+        }
+
+    def _empty_reviewed_summary(self) -> dict[str, Any]:
+        return {
+            "approved_reviewed_count": 0,
+            "class_counts": {},
+            "sample_kind_counts": {},
+            "visibility_state_counts": {},
+            "bbox_review_state_counts": {},
+            "capture_reason_counts": {},
+            "detection_recommendation_counts": {},
+            "identity_recommendation_counts": {},
+            "annotation_recommendation_counts": {},
+            "packaged_counts": {
+                "detection": 0,
+                "identity": 0,
+                "annotation": 0,
             },
         }

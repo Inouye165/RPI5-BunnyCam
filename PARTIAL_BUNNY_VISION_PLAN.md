@@ -673,11 +673,11 @@ capability should land with the same clarity.
 - [x] Add packaging and workflow tests
 
 #### Phase 7
-- [ ] Add feature flags for rollout
-- [ ] Add observability for capture and review outcomes
+- [x] Add feature flags for rollout
+- [x] Add observability for capture and review outcomes
 - [ ] Tune thresholds on the Pi
 - [ ] Evaluate optional bunny-specific detector rollout
-- [ ] Add rollout / status tests
+- [x] Add rollout / status tests
 
 #### Phase 8
 - [ ] Update README and training docs
@@ -699,6 +699,7 @@ Update this table after each meaningful step.
 | 2026-04-05 | Phase 4 | Missed-detection fallback capture path. movement_tracker.py gains `get_fallback_signal(dets, now)` returning last-known bunny position when a sticky bunny track is recently lost. candidate_collection.py gains `collect_fallback()` method with 5 config knobs: `fallback_enabled`, `fallback_cooldown_sec=30`, `fallback_max_per_session=20`, `fallback_min_elapsed_sec=2`, `fallback_max_elapsed_sec=60`. Saves full-frame + proposal crop centred on last known position. Tagged with `capture_reason="fallback_recent_bunny_track"`, `sample_kind="hard_case"`, `bbox_review_state="proposal_only"`, `visibility_state="unknown"`, `confidence=0.0`. detect.py worker loop calls fallback path when no cat-class detections present and movement tracker signals a recently-lost bunny. Status exposes `fallback_saved_total` and `fallback_enabled`. Fixed deadlock in initial implementation where `_mark_skip` was called inside held lock. | 234 passed (225 existing + 9 new), 0 failed. | Phase 5 should add quality-gate scoring for hard-case captures. Fallback proposal boxes are unverified (`bbox_review_state="proposal_only"`) and must not be used for training without human review. The `is_rabbit_alias` field on fallback items is `False` because the detection came from the tracker signal, not the YOLO detector alias path. |
 | 2026-04-06 | Phase 5 | Quality gate and continuity logic. candidate_collection.py now keeps a stricter default path for person/dog and normal interior detections while routing bunny-like cat hard cases into richer metadata. Edge-touch boxes become `capture_reason="detected_partial_edge"` with `visibility_state="partial"`; low-confidence rabbit-alias crops can be retained as `sample_kind="hard_case"` with `visibility_state="blurry"`; hard-case detector-positive items retain full-frame images for later annotation. Fallback proposal captures now mark `visibility_state="partial"` when the proposal touches a frame edge. movement_tracker.py adds a short continuity hold so a recently sticky bunny track is not replaced by one weak cat frame before fallback logic gets a chance to act. | Full pytest before change: 234 passed. Full pytest after change: 240 passed (234 existing + 6 new), 0 failed. | Rear-view and obstructed routing remain intentionally heuristic and metadata-only in this phase; no broad classifier or review UI redesign was added. |
 | 2026-04-06 | Phase 6 | Dataset packaging and training workflow updates. training_dataset.py now applies explicit packaging policy from review metadata instead of incidental bbox/frame availability alone: detector packaging accepts reviewed detector-positive items and corrected hard-cases, identity packaging stays conservative (`detector_positive` or `identity_only` only), and approved hard-case / fallback-origin reviewed items package into a dedicated `annotation` bundle for stronger-machine review. Detection, identity, and annotation manifests now carry provenance counts (`sample_kind`, `visibility_state`, `bbox_review_state`, `capture_reason`, packaging decisions). reviewed_export.py now records per-item packaging recommendations and manifest summaries so exported reviewed bundles make the intended downstream path visible. tools/training_cli.py can validate annotation bundles, detector_training.py preserves packaging provenance in run planning, and training/README.md documents the explicit packaging split. | Full pytest before change: 240 passed. Targeted pytest during implementation: 68 passed. Full pytest after change: 246 passed, 0 failed. | Existing Phase 7 detector execution docs/code already existed, so this phase stayed narrowly focused on packaging/workflow provenance and did not expand rollout or runtime behavior. |
+| 2026-04-06 | Phase 7 (observability slice) | Added bounded runtime observability and conservative rollout plumbing without changing the default detector path. candidate_collection.py now exposes `saved_by_capture_reason`, `saved_by_sample_kind`, `saved_by_visibility_state`, full-frame retention totals, and a `bunny_rollout` summary that separates detector-positive cat captures, hard-case cat captures, fallback captures, and rabbit-alias saves. Added explicit `BUNNYCAM_BUNNY_HARD_CASE_CAPTURE` config plumbing with a default that preserves current behavior, and surfaced the active rollout knobs through status. training_dataset.py now stores a `reviewed_summary` plus per-dataset provenance/recommendation counts in `last_packaging.json` so operators can see how many reviewed items are recommended for detection, identity, or annotation-only paths before any broader runtime rollout. | Full pytest before change: 246 passed. Targeted pytest during implementation: 104 passed. Full pytest after change: 249 passed, 0 failed. | Phase 7 remains intentionally narrow in this turn: no detector replacement, no live inference switching, and no Pi threshold retuning yet. |
 
 ---
 
@@ -729,6 +730,9 @@ Update this table after each meaningful step.
 - Phase 7 should expose the new packaging provenance counts so rollout tuning
   can measure how many reviewed items become detector positives versus
   annotation-only candidates over time.
+- Phase 7 now exposes those counts in both runtime collector status and
+  training packaging status. Pi-side threshold tuning and any model rollout
+  remain deferred until those metrics are observed on-device.
 
 ### Needed info / unresolved decisions
 
