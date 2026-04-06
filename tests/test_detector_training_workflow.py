@@ -169,6 +169,33 @@ def test_detector_training_run_planning():
     assert command["trainer"] == "ultralytics.YOLO.train"
 
 
+def test_detector_training_run_planning_preserves_packaging_provenance():
+    """Detector training planning carries dataset provenance counts into the run manifest."""
+    tmp_path = Path(tempfile.mkdtemp())
+    manager = _temp_manager(tmp_path)
+    dataset_path = _fake_dataset(tmp_path)
+    manifest_path = dataset_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["sample_kind_counts"] = {"detector_positive": 3, "hard_case": 2}
+    manifest["capture_reason_counts"] = {"detected_track": 3, "fallback_recent_bunny_track": 2}
+    manifest["bbox_review_state_counts"] = {"detector_box_ok": 3, "corrected": 2}
+    manifest["packaging_decision_counts"] = {"approved_detector_positive": 3, "corrected_hard_case": 2}
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    planned = manager.plan_run(str(dataset_path), profile_name="quick", stamp="20260406_200000")
+
+    assert planned["dataset"]["sample_kind_counts"] == {"detector_positive": 3, "hard_case": 2}
+    assert planned["dataset"]["capture_reason_counts"] == {
+        "detected_track": 3,
+        "fallback_recent_bunny_track": 2,
+    }
+    assert planned["dataset"]["bbox_review_state_counts"] == {"detector_box_ok": 3, "corrected": 2}
+    assert planned["dataset"]["packaging_decision_counts"] == {
+        "approved_detector_positive": 3,
+        "corrected_hard_case": 2,
+    }
+
+
 def test_detector_training_run_scaffolding():
     """Test detector training run scaffolding writes files correctly."""
     tmp_path = Path(tempfile.mkdtemp())

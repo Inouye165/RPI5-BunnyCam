@@ -16,6 +16,9 @@ from review_queue import CandidateReviewQueue
 SUPPORTED_CLASSES = ("person", "dog", "cat", "bunny")
 DETECTION_CLASS_IDS = {name: index for index, name in enumerate(SUPPORTED_CLASSES)}
 VAL_SPLIT_PERCENT = 20
+DETECTION_READY_SAMPLE_KINDS = {"detector_positive"}
+IDENTITY_READY_SAMPLE_KINDS = {"detector_positive", "identity_only"}
+ANNOTATION_REQUIRED_BBOX_STATES = {"proposal_only", "needs_annotation"}
 
 
 def _iso_now() -> str:
@@ -86,6 +89,79 @@ def _count_by(items: list[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
+def _normalize_review_flag(value: Any, default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized or default
+
+
+def _packaging_policy(item: dict[str, Any]) -> dict[str, str | bool]:
+    sample_kind = _normalize_review_flag(item.get("sample_kind"), "detector_positive")
+    visibility_state = _normalize_review_flag(item.get("visibility_state"), "unknown")
+    bbox_review_state = _normalize_review_flag(item.get("bbox_review_state"), "detector_box_ok")
+    capture_reason = _normalize_review_flag(item.get("capture_reason"), "detected_track")
+    frame_path = str(item.get("frame_path") or "").strip()
+
+    detection_ready = False
+    detection_reason = "sample_kind_not_detector_positive"
+    if sample_kind in DETECTION_READY_SAMPLE_KINDS:
+        detection_ready = True
+        detection_reason = "approved_detector_positive"
+    elif sample_kind == "hard_case" and bbox_review_state == "corrected":
+        detection_ready = True
+        detection_reason = "corrected_hard_case"
+    elif sample_kind == "hard_case":
+        detection_reason = "hard_case_requires_explicit_detector_promotion"
+    elif sample_kind == "identity_only":
+        detection_reason = "identity_only_sample"
+    elif sample_kind == "detector_negative":
+        detection_reason = "detector_negative_sample"
+    elif sample_kind == "ignore":
+        detection_reason = "ignored_sample"
+
+    identity_ready = sample_kind in IDENTITY_READY_SAMPLE_KINDS
+    if identity_ready:
+        identity_reason = "approved_identity_sample"
+    elif sample_kind == "hard_case":
+        identity_reason = "hard_case_identity_blocked"
+    elif sample_kind == "detector_negative":
+        identity_reason = "detector_negative_identity_blocked"
+    elif sample_kind == "ignore":
+        identity_reason = "ignored_sample"
+    else:
+        identity_reason = "sample_kind_not_identity_ready"
+
+    annotation_ready = False
+    annotation_reason = "not_annotation_candidate"
+    if not detection_ready and (
+        sample_kind == "hard_case"
+        or bbox_review_state in ANNOTATION_REQUIRED_BBOX_STATES
+        or capture_reason.startswith("fallback_")
+    ):
+        if frame_path:
+            annotation_ready = True
+            if bbox_review_state in ANNOTATION_REQUIRED_BBOX_STATES:
+                annotation_reason = f"bbox_{bbox_review_state}"
+            elif capture_reason.startswith("fallback_"):
+                annotation_reason = "fallback_annotation_bundle"
+            else:
+                annotation_reason = "hard_case_annotation_bundle"
+        else:
+            annotation_reason = "missing_frame_path"
+
+    return {
+        "sample_kind": sample_kind,
+        "visibility_state": visibility_state,
+        "bbox_review_state": bbox_review_state,
+        "capture_reason": capture_reason,
+        "detection_ready": detection_ready,
+        "detection_reason": detection_reason,
+        "identity_ready": identity_ready,
+        "identity_reason": identity_reason,
+        "annotation_ready": annotation_ready,
+        "annotation_reason": annotation_reason,
+    }
+
+
 class TrainingDatasetPackager:
     """Build versioned detection and identity datasets from approved review items."""
 
@@ -105,6 +181,7 @@ class TrainingDatasetPackager:
         stamp = package_stamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         detection_payload = self._package_detection_dataset(approved_items, stamp=stamp, version_info=version_info or {})
         identity_payload = self._package_identity_dataset(approved_items, stamp=stamp, version_info=version_info or {})
+        annotation_payload = self._package_annotation_dataset(approved_items, stamp=stamp, version_info=version_info or {})
 
         payload = {
             "generated_at": _iso_now(),
@@ -114,6 +191,7 @@ class TrainingDatasetPackager:
             "source_rule": "approved_reviewed_only",
             "detection": detection_payload,
             "identity": identity_payload,
+            "annotation": annotation_payload,
         }
         _json_write(self.status_path, payload)
         return payload
@@ -133,6 +211,7 @@ class TrainingDatasetPackager:
         payload.setdefault("source_rule", "approved_reviewed_only")
         payload.setdefault("detection", self._empty_status("detection"))
         payload.setdefault("identity", self._empty_status("identity"))
+        payload.setdefault("annotation", self._empty_status("annotation"))
         return payload
 
     def validate_detection_dataset(self, dataset_path: str) -> dict[str, Any]:
@@ -210,6 +289,42 @@ class TrainingDatasetPackager:
             "errors": errors,
         }
 
+    def validate_annotation_dataset(self, dataset_path: str) -> dict[str, Any]:
+        manifest = _json_read(os.path.join(dataset_path, "manifest.json"))
+        items = [item for item in manifest.get("items", []) if isinstance(item, dict)]
+        errors: list[dict[str, Any]] = []
+        class_counts: Counter[str] = Counter()
+        reason_counts: Counter[str] = Counter()
+        for item in items:
+            candidate_id = item.get("candidate_id")
+            class_name = str(item.get("class_name") or "unknown")
+            annotation_reason = str(item.get("annotation_reason") or "unknown")
+            class_counts[class_name] += 1
+            reason_counts[annotation_reason] += 1
+            for path_key in ("image_path", "metadata_path"):
+                path_value = item.get(path_key)
+                if not isinstance(path_value, str) or not path_value:
+                    errors.append({"candidate_id": candidate_id, "reason": f"missing_{path_key}"})
+                    continue
+                absolute_path = os.path.join(dataset_path, path_value.replace("/", os.sep))
+                if not os.path.isfile(absolute_path):
+                    errors.append({"candidate_id": candidate_id, "reason": f"missing_file:{path_key}"})
+            crop_path = item.get("crop_path")
+            if isinstance(crop_path, str) and crop_path:
+                absolute_crop = os.path.join(dataset_path, crop_path.replace("/", os.sep))
+                if not os.path.isfile(absolute_crop):
+                    errors.append({"candidate_id": candidate_id, "reason": "missing_file:crop_path"})
+
+        return {
+            "dataset_type": "annotation",
+            "dataset_path": dataset_path,
+            "item_count": len(items),
+            "class_counts": dict(sorted(class_counts.items())),
+            "annotation_reason_counts": dict(sorted(reason_counts.items())),
+            "error_count": len(errors),
+            "errors": errors,
+        }
+
     def scaffold_detector_training(self, dataset_path: str, *, stamp: str | None = None, model_root: str | None = None) -> dict[str, Any]:
         run_stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         output_root = model_root or os.path.join(os.path.dirname(self.training_root), "models", "detection")
@@ -271,6 +386,16 @@ class TrainingDatasetPackager:
             if effective_class not in DETECTION_CLASS_IDS:
                 skipped.append({"candidate_id": candidate_id, "reason": "unsupported_effective_class"})
                 continue
+            packaging = _packaging_policy(item)
+            if not packaging["detection_ready"]:
+                skipped.append({
+                    "candidate_id": candidate_id,
+                    "reason": packaging["detection_reason"],
+                    "sample_kind": packaging["sample_kind"],
+                    "bbox_review_state": packaging["bbox_review_state"],
+                    "capture_reason": packaging["capture_reason"],
+                })
+                continue
             bbox_norm = _normalize_bbox(item.get("bbox_norm"))
             if bbox_norm is None:
                 skipped.append({"candidate_id": candidate_id, "reason": "missing_bbox_norm"})
@@ -318,6 +443,11 @@ class TrainingDatasetPackager:
                 "class_name": effective_class,
                 "identity_label": item.get("identity_label"),
                 "bbox_norm": bbox_norm,
+                "sample_kind": packaging["sample_kind"],
+                "visibility_state": packaging["visibility_state"],
+                "bbox_review_state": packaging["bbox_review_state"],
+                "capture_reason": packaging["capture_reason"],
+                "packaging_decision": packaging["detection_reason"],
                 "image_path": image_rel.replace(os.sep, "/"),
                 "label_path": label_rel.replace(os.sep, "/"),
                 "metadata_path": metadata_rel.replace(os.sep, "/"),
@@ -349,6 +479,12 @@ class TrainingDatasetPackager:
             "skipped_count": len(skipped),
             "split_counts": _count_by(items, "split"),
             "class_counts": _count_by(items, "class_name"),
+            "sample_kind_counts": _count_by(items, "sample_kind"),
+            "visibility_state_counts": _count_by(items, "visibility_state"),
+            "bbox_review_state_counts": _count_by(items, "bbox_review_state"),
+            "capture_reason_counts": _count_by(items, "capture_reason"),
+            "packaging_decision_counts": _count_by(items, "packaging_decision"),
+            "skipped_reason_counts": _count_by(skipped, "reason"),
             "dataset_yaml_path": dataset_yaml_path,
             "records_path": records_path,
             "items": items,
@@ -385,6 +521,16 @@ class TrainingDatasetPackager:
             if not identity_label:
                 skipped.append({"candidate_id": candidate_id, "reason": "missing_identity_label"})
                 continue
+            packaging = _packaging_policy(item)
+            if not packaging["identity_ready"]:
+                skipped.append({
+                    "candidate_id": candidate_id,
+                    "reason": packaging["identity_reason"],
+                    "sample_kind": packaging["sample_kind"],
+                    "visibility_state": packaging["visibility_state"],
+                    "bbox_review_state": packaging["bbox_review_state"],
+                })
+                continue
             effective_class = str(item.get("effective_class_name") or item.get("class_name") or "").strip().lower()
             if effective_class not in SUPPORTED_CLASSES:
                 skipped.append({"candidate_id": candidate_id, "reason": "unsupported_effective_class"})
@@ -412,6 +558,11 @@ class TrainingDatasetPackager:
                 "candidate_id": candidate_id,
                 "class_name": effective_class,
                 "identity_label": identity_label,
+                "sample_kind": packaging["sample_kind"],
+                "visibility_state": packaging["visibility_state"],
+                "bbox_review_state": packaging["bbox_review_state"],
+                "capture_reason": packaging["capture_reason"],
+                "packaging_decision": packaging["identity_reason"],
                 "source_crop": source_crop,
                 "source_crop_path": crop_path,
                 "source_metadata": source_metadata,
@@ -437,6 +588,11 @@ class TrainingDatasetPackager:
                     "split": split,
                     "class_name": class_name,
                     "identity_label": identity_label,
+                    "sample_kind": sample["sample_kind"],
+                    "visibility_state": sample["visibility_state"],
+                    "bbox_review_state": sample["bbox_review_state"],
+                    "capture_reason": sample["capture_reason"],
+                    "packaging_decision": sample["packaging_decision"],
                     "image_path": image_rel.replace(os.sep, "/"),
                     "metadata_path": metadata_rel.replace(os.sep, "/"),
                     "source_metadata_path": sample["source_metadata_path"],
@@ -458,6 +614,12 @@ class TrainingDatasetPackager:
             "split_counts": _count_by(items, "split"),
             "class_counts": _count_by(items, "class_name"),
             "identity_counts": _count_by(items, "identity_label"),
+            "sample_kind_counts": _count_by(items, "sample_kind"),
+            "visibility_state_counts": _count_by(items, "visibility_state"),
+            "bbox_review_state_counts": _count_by(items, "bbox_review_state"),
+            "capture_reason_counts": _count_by(items, "capture_reason"),
+            "packaging_decision_counts": _count_by(items, "packaging_decision"),
+            "skipped_reason_counts": _count_by(skipped, "reason"),
             "records_path": records_path,
             "items": items,
             "skipped": skipped,
@@ -477,6 +639,123 @@ class TrainingDatasetPackager:
             "split_counts": manifest["split_counts"],
             "class_counts": manifest["class_counts"],
             "identity_counts": manifest["identity_counts"],
+            "validation": validation,
+            "skipped": skipped,
+        }
+
+    def _package_annotation_dataset(self, approved_items: list[dict[str, Any]], *, stamp: str, version_info: dict[str, Any]) -> dict[str, Any]:
+        dataset_path = self._unique_dataset_dir("annotation", stamp)
+        os.makedirs(dataset_path, exist_ok=True)
+        items: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for item in approved_items:
+            candidate_id = str(item.get("candidate_id") or "")
+            packaging = _packaging_policy(item)
+            if not packaging["annotation_ready"]:
+                skipped.append({
+                    "candidate_id": candidate_id,
+                    "reason": packaging["annotation_reason"],
+                    "sample_kind": packaging["sample_kind"],
+                    "bbox_review_state": packaging["bbox_review_state"],
+                    "capture_reason": packaging["capture_reason"],
+                })
+                continue
+
+            effective_class = str(item.get("effective_class_name") or item.get("class_name") or "").strip().lower()
+            if effective_class not in SUPPORTED_CLASSES:
+                skipped.append({"candidate_id": candidate_id, "reason": "unsupported_effective_class"})
+                continue
+
+            frame_path = str(item.get("frame_path") or "").strip()
+            metadata_path = str(item.get("metadata_path") or "").strip()
+            if not frame_path:
+                skipped.append({"candidate_id": candidate_id, "reason": "missing_frame_path"})
+                continue
+            if not metadata_path:
+                skipped.append({"candidate_id": candidate_id, "reason": "missing_metadata_path"})
+                continue
+
+            try:
+                source_frame = self.review_queue.resolve_asset_path(frame_path)
+                source_metadata = self.review_queue.resolve_asset_path(metadata_path)
+            except (FileNotFoundError, ValueError):
+                skipped.append({"candidate_id": candidate_id, "reason": "missing_source_asset"})
+                continue
+
+            frame_ext = os.path.splitext(source_frame)[1] or ".img"
+            image_rel = os.path.join("images", effective_class, f"{candidate_id}{frame_ext}")
+            metadata_rel = os.path.join("metadata", f"{candidate_id}.json")
+            _copy_file(source_frame, os.path.join(dataset_path, image_rel))
+            _copy_file(source_metadata, os.path.join(dataset_path, metadata_rel))
+
+            crop_rel = None
+            crop_path = str(item.get("crop_path") or "").strip()
+            if crop_path:
+                try:
+                    source_crop = self.review_queue.resolve_asset_path(crop_path)
+                except (FileNotFoundError, ValueError):
+                    skipped.append({"candidate_id": candidate_id, "reason": "missing_crop_asset"})
+                    continue
+                crop_ext = os.path.splitext(source_crop)[1] or ".img"
+                crop_rel = os.path.join("crops", effective_class, f"{candidate_id}{crop_ext}")
+                _copy_file(source_crop, os.path.join(dataset_path, crop_rel))
+
+            bbox_norm = _normalize_bbox(item.get("bbox_norm"))
+            items.append({
+                "candidate_id": candidate_id,
+                "class_name": effective_class,
+                "identity_label": item.get("identity_label"),
+                "sample_kind": packaging["sample_kind"],
+                "visibility_state": packaging["visibility_state"],
+                "bbox_review_state": packaging["bbox_review_state"],
+                "capture_reason": packaging["capture_reason"],
+                "annotation_reason": packaging["annotation_reason"],
+                "bbox_norm": bbox_norm,
+                "image_path": image_rel.replace(os.sep, "/"),
+                "crop_path": None if crop_rel is None else crop_rel.replace(os.sep, "/"),
+                "metadata_path": metadata_rel.replace(os.sep, "/"),
+                "source_image_path": frame_path,
+                "source_crop_path": crop_path or None,
+                "source_metadata_path": metadata_path,
+            })
+
+        records_path = os.path.join(dataset_path, "records.jsonl")
+        _write_jsonl(records_path, items)
+        manifest = {
+            "generated_at": _iso_now(),
+            "dataset_type": "annotation",
+            "dataset_name": os.path.basename(dataset_path),
+            "dataset_path": dataset_path,
+            "source_rule": "approved_reviewed_annotation_candidates_only",
+            "selection_rule": "approved hard-case or fallback-origin reviewed items that are not yet explicit detector positives",
+            "version": version_info,
+            "item_count": len(items),
+            "skipped_count": len(skipped),
+            "class_counts": _count_by(items, "class_name"),
+            "sample_kind_counts": _count_by(items, "sample_kind"),
+            "visibility_state_counts": _count_by(items, "visibility_state"),
+            "bbox_review_state_counts": _count_by(items, "bbox_review_state"),
+            "capture_reason_counts": _count_by(items, "capture_reason"),
+            "annotation_reason_counts": _count_by(items, "annotation_reason"),
+            "skipped_reason_counts": _count_by(skipped, "reason"),
+            "records_path": records_path,
+            "items": items,
+            "skipped": skipped,
+        }
+        manifest_path = os.path.join(dataset_path, "manifest.json")
+        _json_write(manifest_path, manifest)
+        validation = self.validate_annotation_dataset(dataset_path)
+        manifest["validation"] = validation
+        _json_write(manifest_path, manifest)
+        return {
+            "dataset_type": "annotation",
+            "dataset_path": dataset_path,
+            "manifest_path": manifest_path,
+            "records_path": records_path,
+            "item_count": len(items),
+            "skipped_count": len(skipped),
+            "class_counts": manifest["class_counts"],
+            "annotation_reason_counts": manifest["annotation_reason_counts"],
             "validation": validation,
             "skipped": skipped,
         }
