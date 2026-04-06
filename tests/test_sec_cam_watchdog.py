@@ -6,8 +6,8 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "tools" / "sec_cam_watchdog.py"
 SPEC = importlib.util.spec_from_file_location("sec_cam_watchdog", MODULE_PATH)
-watchdog = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None
+watchdog = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = watchdog
 SPEC.loader.exec_module(watchdog)
 

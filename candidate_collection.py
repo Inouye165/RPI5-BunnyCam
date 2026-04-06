@@ -160,12 +160,17 @@ class CandidateCollector:
                 continue
 
             box = det.get("box")
-            crop, bbox_px = self._extract_crop(frame_rgb, box)
+            if not isinstance(box, list) or len(box) != 4:
+                self._mark_skip("invalid_crop")
+                continue
+            box_values = [float(value) for value in box]
+
+            crop, bbox_px = self._extract_crop(frame_rgb, box_values)
             if crop is None or bbox_px is None:
                 self._mark_skip("invalid_crop")
                 continue
 
-            route = self._assess_capture_route(det, box, crop)
+            route = self._assess_capture_route(det, box_values, crop)
 
             crop_h, crop_w = crop.shape[:2]
             if crop_w < route["min_crop_width"] or crop_h < route["min_crop_height"]:
@@ -187,7 +192,7 @@ class CandidateCollector:
                 self._mark_skip("track_session_limit")
                 continue
 
-            if not self._should_save(timestamp, box, signature, state):
+            if not self._should_save(timestamp, box_values, signature, state):
                 self._mark_skip("not_distinct_enough")
                 continue
 
@@ -206,7 +211,7 @@ class CandidateCollector:
 
             state.saved_count += 1
             state.last_saved_at = timestamp
-            state.last_box = list(box)
+            state.last_box = list(box_values)
             state.last_signature = signature
             state.last_candidate_id = candidate_id
 
@@ -231,7 +236,7 @@ class CandidateCollector:
     def collect_fallback(
         self,
         frame_rgb: np.ndarray | None,
-        fallback_signal: dict[str, Any],
+        fallback_signal: dict[str, Any] | None,
         *,
         frame_source: str | None = None,
         captured_at: float | None = None,

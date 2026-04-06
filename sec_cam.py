@@ -1,3 +1,5 @@
+# pyright: reportOptionalMemberAccess=false
+
 import io
 import json
 import logging
@@ -10,6 +12,7 @@ import subprocess
 from datetime import datetime
 from threading import Condition, Lock, Thread, Event
 from queue import Queue, Empty, Full
+from typing import Any, TypedDict, cast
 from urllib.parse import quote
 
 import numpy as np
@@ -79,7 +82,27 @@ from camera_backends import create_camera_backend, normalize_camera_backend_name
 from camera_backends.base import BackendUnavailableError
 
 
-PREVIEW_PROFILES = {
+class PreviewProfile(TypedDict):
+    profile: str
+    max_fps: float
+    jpeg_quality: int
+    size: tuple[int, int]
+    source: str
+
+
+class PreviewSettings(TypedDict):
+    backend: str
+    profile: str
+    max_fps: float
+    jpeg_quality: int
+    width: int
+    height: int
+    source: str
+    env_overrides: tuple[str, ...]
+    drop_policy: str
+
+
+PREVIEW_PROFILES: dict[str, PreviewProfile] = {
     "laptop": {
         "profile": "laptop-low-latency",
         "max_fps": 24.0,
@@ -97,10 +120,10 @@ PREVIEW_PROFILES = {
 }
 
 
-def _resolve_preview_settings() -> dict[str, object]:
+def _resolve_preview_settings() -> PreviewSettings:
     backend = normalize_camera_backend_name(os.getenv("CAMERA_BACKEND"))
-    profile = dict(PREVIEW_PROFILES.get(backend, PREVIEW_PROFILES["pi"]))
-    env_overrides = []
+    profile = PREVIEW_PROFILES.get(backend, PREVIEW_PROFILES["pi"])
+    env_overrides: list[str] = []
 
     if os.getenv("BUNNYCAM_PREVIEW_MAX_FPS") is not None:
         env_overrides.append("BUNNYCAM_PREVIEW_MAX_FPS")
@@ -773,7 +796,8 @@ def convert_worker():
     if sys.platform == 'win32':
         _ffmpeg_popen_extra['creationflags'] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
     else:
-        _ffmpeg_popen_extra['preexec_fn'] = lambda: os.nice(10)
+        if hasattr(os, "nice"):
+            _ffmpeg_popen_extra['preexec_fn'] = lambda: os.nice(10)
     while not shutdown_evt.is_set():
         try:
             item = convert_q.get(timeout=0.5)
@@ -1136,8 +1160,8 @@ def _identity_gallery_payload_with_paths(payload: dict) -> dict:
     return rendered
 
 
-def _training_dataset_payload_with_paths(payload: dict) -> dict:
-    def _render(value, key: str | None = None):
+def _training_dataset_payload_with_paths(payload: dict[str, Any]) -> dict[str, Any]:
+    def _render(value: Any, key: str | None = None) -> Any:
         if isinstance(value, dict):
             return {nested_key: _render(nested_value, nested_key) for nested_key, nested_value in value.items()}
         if isinstance(value, list):
@@ -1146,7 +1170,7 @@ def _training_dataset_payload_with_paths(payload: dict) -> dict:
             return _to_repo_relative_path(value)
         return value
 
-    return _render(dict(payload))
+    return cast(dict[str, Any], _render(dict(payload)))
 
 
 def _read_ppm_asset(asset_path: str) -> np.ndarray:

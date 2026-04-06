@@ -10,6 +10,7 @@ Tests verify:
 - Edge cases: no detections, non-bunny only, jitter suppression
 """
 
+# pyright: reportOptionalMemberAccess=false
 # pylint: disable=protected-access
 
 from __future__ import annotations

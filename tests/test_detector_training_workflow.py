@@ -1,5 +1,7 @@
 """Regression tests for Phase 7 detector training workflow."""
 
+# pylint: disable=unused-variable
+
 from __future__ import annotations
 
 import json

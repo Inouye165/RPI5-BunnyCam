@@ -1,5 +1,7 @@
 """Regression tests for the GPIO buzzer module and alarm API routes."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import threading

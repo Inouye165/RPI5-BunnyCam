@@ -1,0 +1,18 @@
+[MASTER]
+ignore=.venv,venv,__pycache__,data,logs,snapshots,recordings,recordings_mp4,htmlcov
+ignore-paths=^\.venv[\\/].*,^venv[\\/].*,^data[\\/].*,^logs[\\/].*,^snapshots[\\/].*,^recordings[\\/].*,^recordings_mp4[\\/].*,^htmlcov[\\/].*
+extension-pkg-allow-list=cv2
+ignored-modules=picamera2,picamera2.encoders,picamera2.outputs,libcamera,cv2
+
+[MESSAGES CONTROL]
+disable=
+    broad-exception-caught,
+    c-extension-no-member,
+    import-error,
+    protected-access,
+    redefined-outer-name,
+    unspecified-encoding,
+    unused-argument
+
+[TYPECHECK]
+generated-members=cv2.*,controls.*,AfModeEnum.*,AfMeteringEnum.*

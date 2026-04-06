@@ -25,6 +25,8 @@ Notes
   Enroll photos taken from a similar distance and angle.
 """
 
+# pyright: reportAttributeAccessIssue=false
+
 import io
 import json
 import os
@@ -32,7 +34,7 @@ import sys
 import time
 import threading
 import logging
-from typing import Callable
+from typing import Callable, cast
 
 import numpy as np
 
@@ -230,7 +232,7 @@ _status: dict = {
 }
 _stop         = threading.Event()
 _thread_lock  = threading.Lock()
-_worker_state = {"thread": None}
+_worker_state: dict[str, threading.Thread | None] = {"thread": None}
 _candidate_collector = CandidateCollector(CANDIDATE_ROOT, CandidateCollectorConfig())
 _movement_tracker = BunnyMovementTracker(
     storage_root=os.path.join(BASE_DIR, "data", "movement"),
@@ -352,7 +354,7 @@ class _DetectionTracker:
                 scores["person"] += CLASS_PERSON_FACE_BOOST
 
         total_score = sum(scores.values())
-        top_class = max(scores, key=scores.get)
+        top_class = max(scores, key=lambda class_name: scores[class_name])
         top_score = scores[top_class]
 
         latest_run = 1
@@ -1028,14 +1030,16 @@ def _run_hailo(frame_rgb: np.ndarray) -> tuple[list[dict], list[list[float]]]:
         return [], []
 
     hailo_profile = _hailo_profile()
+    class_map = cast(dict[int, str], hailo_profile["class_map"])
+    face_labels = cast(set[str], hailo_profile["face_labels"])
     return _decode_hailo_outputs(
         outputs,
         frame_rgb.shape,
         scale,
         pad_x,
         pad_y,
-        class_map=dict(hailo_profile["class_map"]),
-        face_labels=set(hailo_profile["face_labels"]),
+        class_map=dict(class_map),
+        face_labels=set(face_labels),
     )
 
 

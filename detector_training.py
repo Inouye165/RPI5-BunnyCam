@@ -113,7 +113,8 @@ class DetectorTrainingManager:
     def get_latest_dataset_path(self) -> str:
         status_path = os.path.join(self.training_root, "last_packaging.json")
         status = _json_read(status_path)
-        detection = status.get("detection") if isinstance(status.get("detection"), dict) else {}
+        raw_detection = status.get("detection")
+        detection: dict[str, Any] = raw_detection if isinstance(raw_detection, dict) else {}
         dataset_path = detection.get("dataset_path")
         if not isinstance(dataset_path, str) or not dataset_path:
             raise FileNotFoundError("no packaged detection dataset found; run the package command first")
@@ -332,7 +333,8 @@ class DetectorTrainingManager:
             raise ValueError(f"dataset manifest is not a detection dataset: {manifest_path}")
         if not os.path.isfile(dataset_yaml_path):
             raise FileNotFoundError(f"detection dataset yaml not found: {dataset_yaml_path}")
-        validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
+        raw_validation = manifest.get("validation")
+        validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
         if int(validation.get("error_count") or 0) > 0:
             raise ValueError(f"detection dataset validation has errors: {manifest_path}")
         return {
@@ -483,7 +485,8 @@ class DetectorTrainingManager:
         }
 
     def _build_summary(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        output = manifest.get("output") if isinstance(manifest.get("output"), dict) else {}
+        raw_output = manifest.get("output")
+        output: dict[str, Any] = raw_output if isinstance(raw_output, dict) else {}
         return {
             "schema_version": 1,
             "generated_at": _iso_now(),
@@ -564,7 +567,8 @@ class DetectorTrainingManager:
     def _resolve_run_dir(self, run_ref: str) -> str:
         if run_ref == "latest":
             latest_payload = _json_read(self.latest_run_path)
-            run = latest_payload.get("run") if isinstance(latest_payload.get("run"), dict) else {}
+            raw_run = latest_payload.get("run")
+            run: dict[str, Any] = raw_run if isinstance(raw_run, dict) else {}
             run_dir = run.get("run_dir")
             if isinstance(run_dir, str) and run_dir:
                 return run_dir
