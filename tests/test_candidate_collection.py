@@ -448,6 +448,37 @@ def test_export_includes_bunny_items_with_phase3_metadata(tmp_path):
     assert "bbox_review_state" in item
 
 
+def test_export_manifest_records_phase6_packaging_recommendations(tmp_path):
+    """Reviewed export manifest summarizes detector, identity, and annotation recommendations."""
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    fallback_item = collector.collect_fallback(
+        _frame(),
+        _fallback_signal(),
+        frame_source="test_fallback",
+        captured_at=100.0,
+    )
+    assert fallback_item is not None
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        fallback_item["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+    )
+
+    export_payload = _exporter(tmp_path).export_reviewed_dataset(export_stamp="20260406_phase6_export")
+    manifest = json.loads(Path(export_payload["manifest_path"]).read_text(encoding="utf-8"))
+    item = manifest["items"][0]
+
+    assert item["effective_class_name"] == "bunny"
+    assert item["packaging_recommendation"]["detection"] == "skip"
+    assert item["packaging_recommendation"]["detection_reason"] == "hard_case_requires_explicit_detector_promotion"
+    assert item["packaging_recommendation"]["identity"] == "skip"
+    assert item["packaging_recommendation"]["annotation"] == "include"
+    assert manifest["annotation_recommendation_counts"] == {"bbox_proposal_only": 1}
+    assert manifest["detector_recommendation_counts"] == {"hard_case_requires_explicit_detector_promotion": 1}
+
+
 def test_review_schema_fields_persist_through_update(tmp_path):
     """Phase 3 review schema fields can be set and persisted."""
     collector = _collector(tmp_path)

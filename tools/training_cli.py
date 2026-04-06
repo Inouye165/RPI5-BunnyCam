@@ -49,7 +49,7 @@ def main() -> int:
     package_parser.add_argument("--stamp", default=None)
 
     validate_parser = subparsers.add_parser("validate", help="Validate the latest or specified packaged dataset")
-    validate_parser.add_argument("--dataset-type", choices=("detection", "identity"), required=True)
+    validate_parser.add_argument("--dataset-type", choices=("detection", "identity", "annotation"), required=True)
     validate_parser.add_argument("--dataset", default=None)
 
     show_detector_parser = subparsers.add_parser("show-detector-command", help="Show the future detector training command")
@@ -110,11 +110,12 @@ def main() -> int:
 
     if args.command == "validate":
         dataset_path = args.dataset or _latest_dataset_path(packager, args.dataset_type)
-        payload = (
-            packager.validate_detection_dataset(dataset_path)
-            if args.dataset_type == "detection"
-            else packager.validate_identity_dataset(dataset_path)
-        )
+        if args.dataset_type == "detection":
+            payload = packager.validate_detection_dataset(dataset_path)
+        elif args.dataset_type == "identity":
+            payload = packager.validate_identity_dataset(dataset_path)
+        else:
+            payload = packager.validate_annotation_dataset(dataset_path)
         _print(payload)
         return 0
 

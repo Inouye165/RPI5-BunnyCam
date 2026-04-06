@@ -8,6 +8,7 @@ Phase 7 adds a complete detector training execution workflow with versioned run 
 
 - Versioned detection datasets under `data/training/detection/YYYYMMDD_HHMMSS/`
 - Versioned identity datasets under `data/training/identity/YYYYMMDD_HHMMSS/`
+- Versioned annotation bundles under `data/training/annotation/YYYYMMDD_HHMMSS/`
 - Deterministic train/validation splits
 - Validation summaries in each packaged dataset manifest
 - Scaffold commands that write future training run outputs under `data/models/...`
@@ -41,6 +42,12 @@ Validate the latest identity dataset:
 
 ```powershell
 .\.venv\Scripts\python.exe .\tools\training_cli.py validate --dataset-type identity
+```
+
+Validate the latest annotation bundle:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\training_cli.py validate --dataset-type annotation
 ```
 
 Create a detector training scaffold output and show the future command:
@@ -152,6 +159,7 @@ The training workflow maintains comparison-friendly indexes:
 - `dataset.yaml`
 
 Detection packaging is conservative. Items without an approved review state, valid frame image, valid bbox, or valid metadata file are skipped and reported.
+Detector packaging is also explicit: only reviewed detector-positive samples are included by default. Approved hard-case samples stay out of the detector-positive dataset until they are explicitly promoted by review metadata, such as a corrected bbox.
 
 ## Identity Layout
 
@@ -162,6 +170,17 @@ Detection packaging is conservative. Items without an approved review state, val
 - `manifest.json`
 
 Identity packaging only includes approved, labeled items. Unlabeled or invalid items are skipped and reported.
+Identity packaging also excludes approved hard-case samples by default. Use review metadata to keep identity packaging intentional instead of letting partial or fallback samples slip through incidentally.
+
+## Annotation Layout
+
+- `images/<class>/...`
+- `crops/<class>/...` when a crop asset exists
+- `metadata/<candidate_id>.json`
+- `records.jsonl`
+- `manifest.json`
+
+Annotation bundles capture approved hard-case and fallback-origin reviewed items that are not yet explicit detector positives. They preserve frame-level provenance for stronger-machine annotation without polluting the detector-positive dataset.
 
 ## Model Output Scaffolds
 

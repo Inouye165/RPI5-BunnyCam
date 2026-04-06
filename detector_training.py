@@ -346,6 +346,11 @@ class DetectorTrainingManager:
             "item_count": int(manifest.get("item_count") or 0),
             "split_counts": manifest.get("split_counts") or {},
             "class_counts": manifest.get("class_counts") or {},
+            "sample_kind_counts": manifest.get("sample_kind_counts") or {},
+            "visibility_state_counts": manifest.get("visibility_state_counts") or {},
+            "bbox_review_state_counts": manifest.get("bbox_review_state_counts") or {},
+            "capture_reason_counts": manifest.get("capture_reason_counts") or {},
+            "packaging_decision_counts": manifest.get("packaging_decision_counts") or {},
         }
 
     def _build_launcher_command(

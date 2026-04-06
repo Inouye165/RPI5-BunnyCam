@@ -26,6 +26,72 @@ def _json_write(path: str, payload: dict[str, Any]) -> None:
         json.dump(payload, json_file, indent=2, sort_keys=True)
 
 
+def _count_by(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        label = str(item.get(key) or "unknown")
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _normalize_review_flag(value: Any, default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized or default
+
+
+def _packaging_recommendation(item: dict[str, Any]) -> dict[str, str]:
+    sample_kind = _normalize_review_flag(item.get("sample_kind"), "detector_positive")
+    bbox_review_state = _normalize_review_flag(item.get("bbox_review_state"), "detector_box_ok")
+    capture_reason = _normalize_review_flag(item.get("capture_reason"), "detected_track")
+
+    detection = "skip"
+    detection_reason = "sample_kind_not_detector_positive"
+    if sample_kind == "detector_positive":
+        detection = "include"
+        detection_reason = "approved_detector_positive"
+    elif sample_kind == "hard_case" and bbox_review_state == "corrected":
+        detection = "include"
+        detection_reason = "corrected_hard_case"
+    elif sample_kind == "hard_case":
+        detection_reason = "hard_case_requires_explicit_detector_promotion"
+    elif sample_kind == "identity_only":
+        detection_reason = "identity_only_sample"
+
+    identity = "include" if sample_kind in {"detector_positive", "identity_only"} else "skip"
+    if identity == "include":
+        identity_reason = "approved_identity_sample"
+    elif sample_kind == "hard_case":
+        identity_reason = "hard_case_identity_blocked"
+    elif sample_kind == "detector_negative":
+        identity_reason = "detector_negative_identity_blocked"
+    else:
+        identity_reason = "sample_kind_not_identity_ready"
+
+    annotation = "skip"
+    annotation_reason = "not_annotation_candidate"
+    if detection == "skip" and (
+        sample_kind == "hard_case"
+        or bbox_review_state in {"proposal_only", "needs_annotation"}
+        or capture_reason.startswith("fallback_")
+    ):
+        annotation = "include"
+        if bbox_review_state in {"proposal_only", "needs_annotation"}:
+            annotation_reason = f"bbox_{bbox_review_state}"
+        elif capture_reason.startswith("fallback_"):
+            annotation_reason = "fallback_annotation_bundle"
+        else:
+            annotation_reason = "hard_case_annotation_bundle"
+
+    return {
+        "detection": detection,
+        "detection_reason": detection_reason,
+        "identity": identity,
+        "identity_reason": identity_reason,
+        "annotation": annotation,
+        "annotation_reason": annotation_reason,
+    }
+
+
 class ReviewedDatasetExporter:
     """Create versioned export bundles from approved review queue items.
 
@@ -70,6 +136,7 @@ class ReviewedDatasetExporter:
 
             effective_class = item.get("effective_class_name") or item.get("class_name") or "unknown"
             identity_bucket = _slug(item.get("identity_label"), "unlabeled")
+            packaging = _packaging_recommendation(item)
             image_ext = os.path.splitext(source_image)[1] or ".img"
             dest_image_rel = os.path.join("images", _slug(str(effective_class), "unknown"), identity_bucket, f"{item['candidate_id']}{image_ext}")
             dest_metadata_rel = os.path.join("metadata", f"{item['candidate_id']}.json")
@@ -103,6 +170,7 @@ class ReviewedDatasetExporter:
                 "sample_kind": item.get("sample_kind"),
                 "visibility_state": item.get("visibility_state"),
                 "bbox_review_state": item.get("bbox_review_state"),
+                "packaging_recommendation": packaging,
             })
 
         manifest = {
@@ -112,6 +180,20 @@ class ReviewedDatasetExporter:
             "version": version_info or {},
             "exported_count": len(exported_items),
             "skipped_count": len(skipped_items),
+            "class_counts": _count_by(exported_items, "effective_class_name"),
+            "sample_kind_counts": _count_by(exported_items, "sample_kind"),
+            "visibility_state_counts": _count_by(exported_items, "visibility_state"),
+            "bbox_review_state_counts": _count_by(exported_items, "bbox_review_state"),
+            "capture_reason_counts": _count_by(exported_items, "capture_reason"),
+            "detector_recommendation_counts": _count_by(
+                [item["packaging_recommendation"] for item in exported_items], "detection_reason"
+            ),
+            "identity_recommendation_counts": _count_by(
+                [item["packaging_recommendation"] for item in exported_items], "identity_reason"
+            ),
+            "annotation_recommendation_counts": _count_by(
+                [item["packaging_recommendation"] for item in exported_items], "annotation_reason"
+            ),
             "items": exported_items,
             "skipped": skipped_items,
         }

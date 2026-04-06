@@ -43,10 +43,22 @@ def _detection(
     }
 
 
-def _collector(tmp_path: Path, *, save_full_frame: bool = False) -> CandidateCollector:
+def _fallback_signal(**overrides) -> dict:
+    payload = {
+        "track_id": 77,
+        "last_cx": 0.52,
+        "last_cy": 0.48,
+        "elapsed_sec": 5.0,
+        "bunny_hits": 8,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _collector(tmp_path: Path, *, save_full_frame: bool = False, **config_overrides) -> CandidateCollector:
     return CandidateCollector(
         str(tmp_path / "data" / "candidates"),
-        CandidateCollectorConfig(save_full_frame=save_full_frame),
+        CandidateCollectorConfig(save_full_frame=save_full_frame, **config_overrides),
     )
 
 
@@ -181,6 +193,7 @@ def test_training_packager_status_tracks_latest_package(tmp_path):
     assert status["package_name"] == "20260326_072040"
     assert status["detection"]["item_count"] == 1
     assert status["identity"]["item_count"] == 1
+    assert status["annotation"]["item_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +261,133 @@ def test_existing_person_dog_cat_packaging_unaffected_by_bunny_addition(tmp_path
     assert DETECTION_CLASS_IDS["dog"] == 1
     assert DETECTION_CLASS_IDS["cat"] == 2
     assert DETECTION_CLASS_IDS["bunny"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — explicit hard-case packaging and workflow provenance
+# ---------------------------------------------------------------------------
+
+def test_fallback_hard_case_packages_into_annotation_bundle_only_by_default(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    record = collector.collect_fallback(
+        _frame(),
+        _fallback_signal(),
+        frame_source="test_fallback",
+        captured_at=100.0,
+    )
+    assert record is not None
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+        identity_label="Bun-bun",
+    )
+
+    payload = _packager(tmp_path).package_training_datasets(package_stamp="20260406_phase6_ann")
+    detection_manifest = json.loads(Path(payload["detection"]["manifest_path"]).read_text(encoding="utf-8"))
+    identity_manifest = json.loads(Path(payload["identity"]["manifest_path"]).read_text(encoding="utf-8"))
+    annotation_manifest = json.loads(Path(payload["annotation"]["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert payload["detection"]["item_count"] == 0
+    assert payload["identity"]["item_count"] == 0
+    assert payload["annotation"]["item_count"] == 1
+    assert annotation_manifest["class_counts"] == {"bunny": 1}
+    assert annotation_manifest["annotation_reason_counts"] == {"bbox_proposal_only": 1}
+    assert annotation_manifest["items"][0]["capture_reason"] == "fallback_recent_bunny_track"
+    assert annotation_manifest["items"][0]["bbox_review_state"] == "proposal_only"
+    assert any(entry["reason"] == "hard_case_requires_explicit_detector_promotion" for entry in detection_manifest["skipped"])
+    assert any(entry["reason"] == "hard_case_identity_blocked" for entry in identity_manifest["skipped"])
+
+
+def test_corrected_hard_case_can_flow_into_detection_packaging_with_provenance(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    record = collector.collect_fallback(
+        _frame(),
+        _fallback_signal(last_cx=0.2, last_cy=0.55),
+        captured_at=100.0,
+    )
+    assert record is not None
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+        bbox_review_state="corrected",
+        identity_label="Bun-bun",
+    )
+
+    payload = _packager(tmp_path).package_training_datasets(package_stamp="20260406_phase6_det")
+    detection_manifest = json.loads(Path(payload["detection"]["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert payload["detection"]["item_count"] == 1
+    assert payload["annotation"]["item_count"] == 0
+    assert detection_manifest["class_counts"] == {"bunny": 1}
+    assert detection_manifest["packaging_decision_counts"] == {"corrected_hard_case": 1}
+    assert detection_manifest["capture_reason_counts"] == {"fallback_recent_bunny_track": 1}
+    assert detection_manifest["items"][0]["sample_kind"] == "hard_case"
+    assert detection_manifest["items"][0]["bbox_review_state"] == "corrected"
+
+
+def test_legacy_reviewed_metadata_remains_backward_compatible_for_packaging(tmp_path):
+    metadata_dir = tmp_path / "data" / "candidates" / "metadata" / "2026" / "04" / "06"
+    images_dir = tmp_path / "data" / "candidates" / "images" / "2026" / "04" / "06"
+    frames_dir = tmp_path / "data" / "candidates" / "frames" / "2026" / "04" / "06"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    crop_path = images_dir / "legacy_phase6.bmp"
+    frame_path = frames_dir / "legacy_phase6.bmp"
+    crop_path.write_bytes(b"crop")
+    frame_path.write_bytes(b"frame")
+    payload = {
+        "version": 1,
+        "candidate_id": "legacy_phase6",
+        "timestamp": "2026-04-06T12:00:00Z",
+        "class_name": "cat",
+        "raw_class_name": "cat",
+        "identity_label": "Mochi",
+        "review_state": "approved",
+        "reviewed_at": "2026-04-06T12:05:00Z",
+        "corrected_class_name": "bunny",
+        "track_id": 5,
+        "track_hits": 4,
+        "bbox_norm": [0.2, 0.2, 0.7, 0.8],
+        "bbox_pixels": [64, 48, 224, 192],
+        "confidence": 0.92,
+        "crop_path": "images/2026/04/06/legacy_phase6.bmp",
+        "frame_path": "frames/2026/04/06/legacy_phase6.bmp",
+        "source": {"camera_backend": "auto", "frame_source": "legacy", "frame_width": 320, "frame_height": 240},
+        "quality": {"crop_width": 160, "crop_height": 144, "brightness": 100.0, "blur_estimate": 120.0, "pixel_stddev": 30.0, "face_visible": None},
+        "tracking": {"display_class": None, "display_label": None, "display_class_reason": None},
+    }
+    (metadata_dir / "legacy_phase6.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    package_payload = _packager(tmp_path).package_training_datasets(package_stamp="20260406_phase6_legacy")
+
+    assert package_payload["detection"]["item_count"] == 1
+    assert package_payload["identity"]["item_count"] == 1
+    assert package_payload["annotation"]["item_count"] == 0
+
+
+def test_annotation_dataset_validation_reports_missing_frame_copy(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    record = collector.collect_fallback(_frame(), _fallback_signal(), captured_at=100.0)
+    assert record is not None
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(record["candidate_id"], review_state="approved", corrected_class_name="bunny")
+    packager = _packager(tmp_path)
+    payload = packager.package_training_datasets(package_stamp="20260406_phase6_validate")
+    manifest = json.loads(Path(payload["annotation"]["manifest_path"]).read_text(encoding="utf-8"))
+    image_path = Path(payload["annotation"]["dataset_path"]) / manifest["items"][0]["image_path"]
+    image_path.unlink()
+
+    validation = packager.validate_annotation_dataset(payload["annotation"]["dataset_path"])
+
+    assert validation["item_count"] == 1
+    assert validation["error_count"] == 1
+    assert validation["errors"][0]["reason"] == "missing_file:image_path"
