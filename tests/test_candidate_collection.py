@@ -146,6 +146,51 @@ def test_bunny_hard_case_rollout_flag_preserves_normal_capture_when_disabled(tmp
     assert status["rollout_config"]["bunny_hard_case_enabled"] is False
 
 
+def test_hard_case_conf_env_override_only_changes_alias_cat_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUNNYCAM_BUNNY_HARD_CASE_CONF_MAX", "0.75")
+    collector = CandidateCollector(str(tmp_path / "data" / "candidates"), CandidateCollectorConfig())
+
+    alias_cat = {
+        **_detection(class_name="cat", track_id=81, track_hits=5, conf=0.7),
+        "is_rabbit_alias": True,
+        "detector_coco_class_id": 77,
+    }
+    normal_cat = _detection(class_name="cat", track_id=82, track_hits=5, conf=0.7)
+    dog = _detection(class_name="dog", track_id=83, track_hits=5, conf=0.7)
+
+    records = collector.collect(_frame(), [alias_cat, normal_cat, dog], captured_at=100.0)
+    by_track = {record["track_id"]: record for record in records}
+    status = collector.get_status()
+
+    assert by_track[81]["sample_kind"] == "hard_case"
+    assert by_track[81]["capture_reason"] == "detected_low_confidence_alias"
+    assert by_track[81]["full_frame_retained"] is True
+    assert by_track[82]["sample_kind"] == "detector_positive"
+    assert by_track[82]["capture_reason"] == "detected_track"
+    assert by_track[83]["sample_kind"] == "detector_positive"
+    assert status["saved_by_sample_kind"] == {"detector_positive": 2, "hard_case": 1}
+
+
+def test_fallback_env_override_changes_spam_gate_without_affecting_normal_collect(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUNNYCAM_FALLBACK_COOLDOWN_SEC", "120")
+    monkeypatch.setenv("BUNNYCAM_FALLBACK_MAX_PER_SESSION", "3")
+    collector = CandidateCollector(str(tmp_path / "data" / "candidates"), CandidateCollectorConfig())
+    frame = _frame()
+    signal = _fallback_signal()
+
+    assert collector.collect_fallback(frame, signal, captured_at=100.0) is not None
+    assert collector.collect_fallback(frame, signal, captured_at=180.0) is None
+    assert collector.collect_fallback(frame, signal, captured_at=221.0) is not None
+
+    normal = collector.collect(frame, [_detection(class_name="person", track_id=84, track_hits=4)], captured_at=260.0)
+    status = collector.get_status()
+
+    assert len(normal) == 1
+    assert status["fallback_saved_total"] == 2
+    assert status["skipped_reasons"]["fallback_cooldown"] == 1
+    assert status["saved_by_class"]["person"] == 1
+
+
 def test_candidate_collection_rate_limits_per_track(tmp_path):
     collector = _collector(tmp_path, save_interval_sec=10.0, min_distinct_gap_sec=2.0)
     frame = _frame()
@@ -202,6 +247,36 @@ def test_candidate_collection_can_be_disabled(tmp_path):
     assert records == []
     assert _metadata_files(tmp_path) == []
     assert collector.get_status()["enabled"] is False
+
+
+def test_candidate_collector_phase7_tuning_defaults_preserve_current_behavior(monkeypatch):
+    monkeypatch.delenv("BUNNYCAM_BUNNY_HARD_CASE_CAPTURE", raising=False)
+    monkeypatch.delenv("BUNNYCAM_BUNNY_HARD_CASE_CONF_MAX", raising=False)
+    monkeypatch.delenv("BUNNYCAM_FALLBACK_COOLDOWN_SEC", raising=False)
+    monkeypatch.delenv("BUNNYCAM_FALLBACK_MAX_PER_SESSION", raising=False)
+
+    config = CandidateCollectorConfig()
+
+    assert config.bunny_hard_case_enabled is True
+    assert config.bunny_hard_case_conf_max == 0.6
+    assert config.fallback_cooldown_sec == 30.0
+    assert config.fallback_max_per_session == 20
+
+
+def test_candidate_collector_phase7_tuning_env_overrides_surface_in_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUNNYCAM_BUNNY_HARD_CASE_CONF_MAX", "0.75")
+    monkeypatch.setenv("BUNNYCAM_FALLBACK_COOLDOWN_SEC", "120")
+    monkeypatch.setenv("BUNNYCAM_FALLBACK_MAX_PER_SESSION", "5")
+
+    collector = CandidateCollector(str(tmp_path / "data" / "candidates"), CandidateCollectorConfig())
+    status = collector.get_status()
+
+    assert collector.config.bunny_hard_case_conf_max == 0.75
+    assert collector.config.fallback_cooldown_sec == 120.0
+    assert collector.config.fallback_max_per_session == 5
+    assert status["rollout_config"]["bunny_hard_case_conf_max"] == 0.75
+    assert status["rollout_config"]["fallback_cooldown_sec"] == 120.0
+    assert status["rollout_config"]["fallback_max_per_session"] == 5
 
 
 def test_review_queue_lists_candidates_newest_first(tmp_path):

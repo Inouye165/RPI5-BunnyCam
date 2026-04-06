@@ -166,6 +166,15 @@ Candidate collection artifacts:
 
 Candidate collection is conservative by default. BunnyCam only saves crops from stable tracked subjects, enforces per-track throttling, skips tiny crops, and suppresses near-identical saves to keep Pi storage growth manageable.
 
+Phase 7 keeps the Pi tuning seam intentionally small. These env vars can be set in `.env.local` or the service environment when validating bunny hard-case behavior on-device:
+
+- `BUNNYCAM_BUNNY_HARD_CASE_CAPTURE`: master enable/disable for bunny hard-case routing. Watch `candidate_collection.rollout_config.bunny_hard_case_enabled` and `candidate_collection.bunny_rollout.hard_case_cat_total`.
+- `BUNNYCAM_BUNNY_HARD_CASE_CONF_MAX`: upper confidence bound for rabbit-alias detections to count as bunny hard cases instead of ordinary detector-positive captures. Watch `saved_by_capture_reason.detected_low_confidence_alias`, `saved_by_sample_kind.hard_case`, and `bunny_rollout.detector_positive_cat_total`.
+- `BUNNYCAM_FALLBACK_COOLDOWN_SEC`: minimum seconds between fallback saves. Watch `bunny_rollout.fallback_capture_total` together with `skipped_reasons.fallback_cooldown`.
+- `BUNNYCAM_FALLBACK_MAX_PER_SESSION`: hard cap for fallback saves in one app session. Watch `bunny_rollout.fallback_capture_total` together with `skipped_reasons.fallback_session_limit`.
+
+Defaults remain conservative and preserve the current runtime behavior. The active values are visible through `GET /candidate-collection/status`, and the reviewed packaging effect is visible through `GET /api/review/training-dataset-status`.
+
 The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
 
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
