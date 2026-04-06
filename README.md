@@ -175,6 +175,9 @@ Phase 7 keeps the Pi tuning seam intentionally small. These env vars can be set 
 
 Defaults remain conservative and preserve the current runtime behavior. The active values are visible through `GET /candidate-collection/status`, and the reviewed packaging effect is visible through `GET /api/review/training-dataset-status`.
 
+For the exact Raspberry Pi operator procedure for Phase 7 validation, see
+`docs/bunny-phase7-pi-validation.md`.
+
 The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
 
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
