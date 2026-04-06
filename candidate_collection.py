@@ -7,7 +7,7 @@ import logging
 import os
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
@@ -67,11 +67,37 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw_value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw_value = os.getenv(name)
+    try:
+        value = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw_value = os.getenv(name)
+    try:
+        value = float(raw_value) if raw_value is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 @dataclass(slots=True)
 class CandidateCollectorConfig:
     """Conservative, Pi-friendly collection settings."""
 
-    enabled: bool = _env_flag("BUNNYCAM_CANDIDATE_COLLECTION", True)
+    enabled: bool = field(default_factory=lambda: _env_flag("BUNNYCAM_CANDIDATE_COLLECTION", True))
     target_classes: tuple[str, ...] = ("person", "dog", "cat")
     min_track_hits: int = 3
     save_interval_sec: float = 15.0
@@ -83,19 +109,33 @@ class CandidateCollectorConfig:
     min_appearance_delta: float = 0.10
     min_crop_stddev: float = 1.5
     save_full_frame: bool = False
-    bunny_hard_case_enabled: bool = _env_flag("BUNNYCAM_BUNNY_HARD_CASE_CAPTURE", True)
+    bunny_hard_case_enabled: bool = field(
+        default_factory=lambda: _env_flag("BUNNYCAM_BUNNY_HARD_CASE_CAPTURE", True),
+    )
     bunny_hard_case_min_track_hits: int = 4
     bunny_hard_case_min_crop_width: int = 72
     bunny_hard_case_min_crop_height: int = 72
     bunny_hard_case_min_stddev: float = 0.9
-    bunny_hard_case_conf_max: float = 0.6
+    bunny_hard_case_conf_max: float = field(
+        default_factory=lambda: _env_float(
+            "BUNNYCAM_BUNNY_HARD_CASE_CONF_MAX", 0.6, minimum=0.05, maximum=1.0,
+        ),
+    )
     bunny_rear_aspect_ratio_min: float = 1.15
     bunny_rear_min_box_area: float = 0.035
 
     # Phase 4 — fallback capture for missed bunny detections.
-    fallback_enabled: bool = _env_flag("BUNNYCAM_FALLBACK_CAPTURE", True)
-    fallback_cooldown_sec: float = 30.0
-    fallback_max_per_session: int = 20
+    fallback_enabled: bool = field(default_factory=lambda: _env_flag("BUNNYCAM_FALLBACK_CAPTURE", True))
+    fallback_cooldown_sec: float = field(
+        default_factory=lambda: _env_float(
+            "BUNNYCAM_FALLBACK_COOLDOWN_SEC", 30.0, minimum=0.0, maximum=3600.0,
+        ),
+    )
+    fallback_max_per_session: int = field(
+        default_factory=lambda: _env_int(
+            "BUNNYCAM_FALLBACK_MAX_PER_SESSION", 20, minimum=0, maximum=500,
+        ),
+    )
     fallback_min_elapsed_sec: float = 2.0
     fallback_max_elapsed_sec: float = 60.0
 
@@ -271,7 +311,10 @@ class CandidateCollector:
         with self._lock:
             if self._fallback_saved_total >= self.config.fallback_max_per_session:
                 gate_reason = "fallback_session_limit"
-            elif timestamp - self._fallback_last_saved_at < self.config.fallback_cooldown_sec:
+            elif (
+                self._fallback_saved_total > 0
+                and timestamp - self._fallback_last_saved_at < self.config.fallback_cooldown_sec
+            ):
                 gate_reason = "fallback_cooldown"
         if gate_reason is not None:
             self._mark_skip(gate_reason)
