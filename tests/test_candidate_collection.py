@@ -86,6 +86,66 @@ def test_candidate_collection_skips_near_identical_duplicates(tmp_path):
     assert collector.get_status()["saved_total"] == 1
 
 
+def test_candidate_collection_status_tracks_capture_routes_and_rollout_config(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    frame = _frame()
+
+    normal = _detection(class_name="cat", track_id=71, track_hits=4, conf=0.91)
+    hard_case = _detection(class_name="cat", track_id=72, track_hits=5, conf=0.42)
+    hard_case["is_rabbit_alias"] = True
+    hard_case["detector_coco_class_id"] = 77
+
+    assert collector.collect(frame, [normal], captured_at=100.0)
+    assert collector.collect(frame, [hard_case], captured_at=140.0)
+    assert collector.collect_fallback(frame, _fallback_signal(), captured_at=200.0) is not None
+
+    status = collector.get_status()
+
+    assert status["saved_by_capture_reason"] == {
+        "detected_low_confidence_alias": 1,
+        "detected_track": 1,
+        "fallback_recent_bunny_track": 1,
+    }
+    assert status["saved_by_sample_kind"] == {"detector_positive": 1, "hard_case": 2}
+    assert status["saved_by_visibility_state"]["full"] == 2
+    assert status["saved_by_visibility_state"]["unknown"] == 1
+    assert status["saved_rabbit_alias_count"] == 1
+    assert status["full_frame_retained_total"] == 2
+    assert status["bunny_rollout"] == {
+        "detector_positive_cat_total": 1,
+        "hard_case_cat_total": 2,
+        "fallback_capture_total": 1,
+        "rabbit_alias_capture_total": 1,
+        "full_frame_retained_total": 2,
+    }
+    assert status["rollout_config"]["bunny_hard_case_enabled"] is True
+    assert status["rollout_config"]["fallback_enabled"] is True
+
+
+def test_bunny_hard_case_rollout_flag_preserves_normal_capture_when_disabled(tmp_path):
+    collector = _collector(tmp_path, bunny_hard_case_enabled=False)
+
+    record = collector.collect(
+        _frame(),
+        [{
+            **_detection(class_name="cat", track_id=73, track_hits=5, conf=0.41),
+            "is_rabbit_alias": True,
+            "detector_coco_class_id": 77,
+        }],
+        captured_at=100.0,
+    )[0]
+
+    status = collector.get_status()
+
+    assert record["sample_kind"] == "detector_positive"
+    assert record["capture_reason"] == "detected_track"
+    assert record["full_frame_retained"] is False
+    assert status["saved_by_sample_kind"] == {"detector_positive": 1}
+    assert status["bunny_rollout"]["detector_positive_cat_total"] == 1
+    assert status["bunny_rollout"]["hard_case_cat_total"] == 0
+    assert status["rollout_config"]["bunny_hard_case_enabled"] is False
+
+
 def test_candidate_collection_rate_limits_per_track(tmp_path):
     collector = _collector(tmp_path, save_interval_sec=10.0, min_distinct_gap_sec=2.0)
     frame = _frame()

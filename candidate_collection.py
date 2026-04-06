@@ -83,6 +83,7 @@ class CandidateCollectorConfig:
     min_appearance_delta: float = 0.10
     min_crop_stddev: float = 1.5
     save_full_frame: bool = False
+    bunny_hard_case_enabled: bool = _env_flag("BUNNYCAM_BUNNY_HARD_CASE_CAPTURE", True)
     bunny_hard_case_min_track_hits: int = 4
     bunny_hard_case_min_crop_width: int = 72
     bunny_hard_case_min_crop_height: int = 72
@@ -118,7 +119,13 @@ class CandidateCollector:
         self._track_states: dict[tuple[str, int], _TrackSaveState] = {}
         self._saved_total = 0
         self._saved_by_class = {name: 0 for name in self.config.target_classes}
+        self._saved_by_capture_reason: dict[str, int] = {}
+        self._saved_by_sample_kind: dict[str, int] = {}
+        self._saved_by_visibility_state: dict[str, int] = {}
         self._saved_rabbit_alias_count = 0
+        self._full_frame_retained_total = 0
+        self._detector_positive_cat_total = 0
+        self._hard_case_cat_total = 0
         self._skipped_reasons: dict[str, int] = {}
         self._last_saved_at: str | None = None
         # Phase 4 — fallback capture state.
@@ -216,11 +223,11 @@ class CandidateCollector:
             state.last_candidate_id = candidate_id
 
             with self._lock:
-                self._saved_total += 1
-                self._saved_by_class[class_name] = self._saved_by_class.get(class_name, 0) + 1
-                if det.get("is_rabbit_alias"):
-                    self._saved_rabbit_alias_count += 1
-                self._last_saved_at = created_at
+                self._record_saved_metadata_locked(
+                    record,
+                    class_name=class_name,
+                    is_rabbit_alias=bool(det.get("is_rabbit_alias")),
+                )
 
             logger.info(
                 "candidate: saved %s class=%s track=%s count=%s",
@@ -373,8 +380,7 @@ class CandidateCollector:
         with self._lock:
             self._fallback_saved_total += 1
             self._fallback_last_saved_at = timestamp
-            self._saved_total += 1
-            self._last_saved_at = created_at
+            self._record_saved_metadata_locked(metadata, class_name=class_name, is_rabbit_alias=False)
 
         logger.info(
             "candidate: fallback saved %s track=%s elapsed=%.1fs",
@@ -390,6 +396,9 @@ class CandidateCollector:
                 "storage_root": self.storage_root,
                 "saved_total": self._saved_total,
                 "saved_by_class": dict(self._saved_by_class),
+                "saved_by_capture_reason": dict(self._saved_by_capture_reason),
+                "saved_by_sample_kind": dict(self._saved_by_sample_kind),
+                "saved_by_visibility_state": dict(self._saved_by_visibility_state),
                 "skipped_reasons": dict(self._skipped_reasons),
                 "last_saved_at": self._last_saved_at,
                 "target_classes": list(self.config.target_classes),
@@ -403,9 +412,60 @@ class CandidateCollector:
                 "min_appearance_delta": self.config.min_appearance_delta,
                 "save_full_frame": self.config.save_full_frame,
                 "saved_rabbit_alias_count": self._saved_rabbit_alias_count,
+                "full_frame_retained_total": self._full_frame_retained_total,
                 "fallback_enabled": bool(self.config.fallback_enabled),
                 "fallback_saved_total": self._fallback_saved_total,
+                "bunny_rollout": {
+                    "detector_positive_cat_total": self._detector_positive_cat_total,
+                    "hard_case_cat_total": self._hard_case_cat_total,
+                    "fallback_capture_total": self._fallback_saved_total,
+                    "rabbit_alias_capture_total": self._saved_rabbit_alias_count,
+                    "full_frame_retained_total": self._full_frame_retained_total,
+                },
+                "rollout_config": {
+                    "bunny_hard_case_enabled": bool(self.config.bunny_hard_case_enabled),
+                    "fallback_enabled": bool(self.config.fallback_enabled),
+                    "bunny_hard_case_min_track_hits": self.config.bunny_hard_case_min_track_hits,
+                    "bunny_hard_case_min_crop_width": self.config.bunny_hard_case_min_crop_width,
+                    "bunny_hard_case_min_crop_height": self.config.bunny_hard_case_min_crop_height,
+                    "bunny_hard_case_min_stddev": self.config.bunny_hard_case_min_stddev,
+                    "bunny_hard_case_conf_max": self.config.bunny_hard_case_conf_max,
+                    "bunny_rear_aspect_ratio_min": self.config.bunny_rear_aspect_ratio_min,
+                    "bunny_rear_min_box_area": self.config.bunny_rear_min_box_area,
+                    "fallback_cooldown_sec": self.config.fallback_cooldown_sec,
+                    "fallback_max_per_session": self.config.fallback_max_per_session,
+                    "fallback_min_elapsed_sec": self.config.fallback_min_elapsed_sec,
+                    "fallback_max_elapsed_sec": self.config.fallback_max_elapsed_sec,
+                },
             }
+
+    def _record_saved_metadata_locked(
+        self,
+        metadata: dict[str, Any],
+        *,
+        class_name: str,
+        is_rabbit_alias: bool,
+    ) -> None:
+        capture_reason = str(metadata.get("capture_reason") or "unknown")
+        sample_kind = str(metadata.get("sample_kind") or "unknown")
+        visibility_state = str(metadata.get("visibility_state") or "unknown")
+
+        self._saved_total += 1
+        self._saved_by_class[class_name] = self._saved_by_class.get(class_name, 0) + 1
+        self._saved_by_capture_reason[capture_reason] = self._saved_by_capture_reason.get(capture_reason, 0) + 1
+        self._saved_by_sample_kind[sample_kind] = self._saved_by_sample_kind.get(sample_kind, 0) + 1
+        self._saved_by_visibility_state[visibility_state] = (
+            self._saved_by_visibility_state.get(visibility_state, 0) + 1
+        )
+        if bool(metadata.get("full_frame_retained")):
+            self._full_frame_retained_total += 1
+        if class_name == "cat" and sample_kind == "detector_positive":
+            self._detector_positive_cat_total += 1
+        if class_name == "cat" and sample_kind == "hard_case":
+            self._hard_case_cat_total += 1
+        if is_rabbit_alias:
+            self._saved_rabbit_alias_count += 1
+        self._last_saved_at = str(metadata.get("timestamp") or self._last_saved_at)
 
     def _mark_skip(self, reason: str) -> None:
         with self._lock:
@@ -622,6 +682,8 @@ class CandidateCollector:
         }
 
         if class_name != "cat":
+            return route
+        if not self.config.bunny_hard_case_enabled:
             return route
 
         any_edge_touch = bool(edge_touch and any(edge_touch.values()))

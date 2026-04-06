@@ -194,6 +194,44 @@ def test_training_packager_status_tracks_latest_package(tmp_path):
     assert status["detection"]["item_count"] == 1
     assert status["identity"]["item_count"] == 1
     assert status["annotation"]["item_count"] == 0
+    assert status["reviewed_summary"]["approved_reviewed_count"] == 1
+    assert status["reviewed_summary"]["packaged_counts"] == {"detection": 1, "identity": 1, "annotation": 0}
+    assert status["reviewed_summary"]["detection_recommendation_counts"] == {"approved_detector_positive": 1}
+    assert status["detection"]["sample_kind_counts"] == {"detector_positive": 1}
+    assert status["detection"]["capture_reason_counts"] == {"detected_track": 1}
+    assert status["identity"]["packaging_decision_counts"] == {"approved_identity_sample": 1}
+
+
+def test_training_packager_status_surfaces_annotation_provenance_counts(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    record = collector.collect_fallback(
+        _frame(),
+        _fallback_signal(),
+        frame_source="test_fallback",
+        captured_at=100.0,
+    )
+    assert record is not None
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+        identity_label="Bun-bun",
+    )
+
+    status = _packager(tmp_path).package_training_datasets(package_stamp="20260406_phase7_status")
+
+    assert status["reviewed_summary"]["sample_kind_counts"] == {"hard_case": 1}
+    assert status["reviewed_summary"]["capture_reason_counts"] == {"fallback_recent_bunny_track": 1}
+    assert status["reviewed_summary"]["detection_recommendation_counts"] == {
+        "hard_case_requires_explicit_detector_promotion": 1
+    }
+    assert status["reviewed_summary"]["annotation_recommendation_counts"] == {"bbox_proposal_only": 1}
+    assert status["reviewed_summary"]["packaged_counts"] == {"detection": 0, "identity": 0, "annotation": 1}
+    assert status["annotation"]["sample_kind_counts"] == {"hard_case": 1}
+    assert status["annotation"]["capture_reason_counts"] == {"fallback_recent_bunny_track": 1}
+    assert status["annotation"]["annotation_reason_counts"] == {"bbox_proposal_only": 1}
 
 
 # ---------------------------------------------------------------------------
