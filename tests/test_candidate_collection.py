@@ -270,3 +270,388 @@ def test_reviewed_export_output_path_is_versioned(tmp_path):
 
     assert Path(first["export_path"]).name == "20260326_063520"
     assert Path(second["export_path"]).name == "20260326_063520_01"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — instrumentation metadata groundwork
+# ---------------------------------------------------------------------------
+
+def test_candidate_metadata_includes_phase2_instrumentation_fields(tmp_path):
+    """New metadata fields added in Phase 2 are present and have correct defaults."""
+    collector = _collector(tmp_path)
+    records = collector.collect(
+        _frame(),
+        [_detection(class_name="cat", track_id=40, conf=0.72)],
+        captured_at=100.0,
+        frame_source="detect_worker",
+    )
+    assert len(records) == 1
+
+    metadata_path = _metadata_files(tmp_path)[0]
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert payload["version"] == 2
+    assert payload["capture_reason"] == "detected_track"
+    assert payload["is_rabbit_alias"] is False
+    assert payload["detector_coco_class_id"] is None
+    assert payload["full_frame_retained"] is False
+    assert isinstance(payload["bbox_edge_touch"], dict)
+    assert set(payload["bbox_edge_touch"].keys()) == {"left", "top", "right", "bottom"}
+
+
+def test_candidate_metadata_records_rabbit_alias_provenance(tmp_path):
+    """When is_rabbit_alias=True and detector_coco_class_id are set, metadata preserves them."""
+    collector = _collector(tmp_path)
+    det = _detection(class_name="cat", track_id=41)
+    det["is_rabbit_alias"] = True
+    det["detector_coco_class_id"] = 77  # teddy_bear
+
+    records = collector.collect(_frame(), [det], captured_at=100.0)
+    assert len(records) == 1
+
+    payload = json.loads(_metadata_files(tmp_path)[0].read_text(encoding="utf-8"))
+    assert payload["is_rabbit_alias"] is True
+    assert payload["detector_coco_class_id"] == 77
+    assert payload["capture_reason"] == "detected_track"
+
+
+def test_candidate_metadata_bbox_edge_touch_detects_edges(tmp_path):
+    """bbox_edge_touch flags sides that are near the frame boundary."""
+    collector = _collector(tmp_path)
+
+    # Box touching left and top edges
+    edge_box = [0.0, 0.0, 0.5, 0.6]
+    records = collector.collect(
+        _frame(),
+        [_detection(track_id=42, box=edge_box)],
+        captured_at=100.0,
+    )
+    assert len(records) == 1
+    touch = records[0]["bbox_edge_touch"]
+    assert touch["left"] is True
+    assert touch["top"] is True
+    assert touch["right"] is False
+    assert touch["bottom"] is False
+
+
+def test_candidate_metadata_bbox_no_edge_touch(tmp_path):
+    """Interior box has no edge touches."""
+    collector = _collector(tmp_path)
+    interior_box = [0.2, 0.15, 0.72, 0.9]
+    records = collector.collect(
+        _frame(),
+        [_detection(track_id=43, box=interior_box)],
+        captured_at=100.0,
+    )
+    assert len(records) == 1
+    touch = records[0]["bbox_edge_touch"]
+    assert touch["left"] is False
+    assert touch["top"] is False
+    assert touch["right"] is False
+    assert touch["bottom"] is False
+
+
+def test_candidate_status_includes_rabbit_alias_count(tmp_path):
+    """Status endpoint exposes rabbit-alias save counter."""
+    collector = _collector(tmp_path)
+    assert collector.get_status()["saved_rabbit_alias_count"] == 0
+
+    det = _detection(class_name="cat", track_id=44)
+    det["is_rabbit_alias"] = True
+    collector.collect(_frame(), [det], captured_at=100.0)
+
+    status = collector.get_status()
+    assert status["saved_rabbit_alias_count"] == 1
+    assert status["saved_total"] == 1
+
+
+def test_candidate_metadata_full_frame_retained_flag(tmp_path):
+    """full_frame_retained reflects the save_full_frame config."""
+    # Default: no full frame
+    collector_no_frame = _collector(tmp_path, save_full_frame=False)
+    records = collector_no_frame.collect(
+        _frame(), [_detection(track_id=45)], captured_at=100.0
+    )
+    assert records[0]["full_frame_retained"] is False
+
+    # With full frame enabled
+    collector_with_frame = _collector(tmp_path, save_full_frame=True)
+    records = collector_with_frame.collect(
+        _frame(), [_detection(track_id=46)], captured_at=200.0
+    )
+    assert records[0]["full_frame_retained"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — review/export schema expansion for bunny
+# ---------------------------------------------------------------------------
+
+def test_bunny_is_accepted_as_corrected_class_in_review(tmp_path):
+    """bunny is a valid corrected_class_name in the review queue."""
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(class_name="cat", track_id=50)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    updated = queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+    )
+    reloaded = _review_queue(tmp_path).get_candidate(record["candidate_id"])
+
+    assert updated["corrected_class_name"] == "bunny"
+    assert updated["effective_class_name"] == "bunny"
+    assert reloaded["corrected_class_name"] == "bunny"
+    assert reloaded["effective_class_name"] == "bunny"
+
+
+def test_bunny_appears_in_available_classes(tmp_path):
+    """list_candidates advertises bunny as an available class."""
+    collector = _collector(tmp_path)
+    collector.collect(_frame(), [_detection(class_name="cat", track_id=51)], captured_at=100.0)
+    payload = _review_queue(tmp_path).list_candidates()
+    assert "bunny" in payload["available_classes"]
+
+
+def test_bunny_review_filter_works(tmp_path):
+    """Filtering by class_name='bunny' returns only bunny-corrected items."""
+    collector = _collector(tmp_path)
+    cat_rec = collector.collect(_frame(), [_detection(class_name="cat", track_id=52)], captured_at=100.0)[0]
+    dog_rec = collector.collect(_frame(), [_detection(class_name="dog", track_id=53)], captured_at=200.0)[0]
+
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(cat_rec["candidate_id"], review_state="approved", corrected_class_name="bunny")
+    queue.update_candidate(dog_rec["candidate_id"], review_state="approved", corrected_class_name="dog")
+
+    bunny_only = queue.list_candidates(class_name="bunny")
+    assert bunny_only["total"] == 1
+    assert bunny_only["items"][0]["effective_class_name"] == "bunny"
+
+
+def test_export_includes_bunny_items_with_phase3_metadata(tmp_path):
+    """Exported bunny items carry Phase 2/3 metadata fields."""
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(class_name="cat", track_id=54)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(record["candidate_id"], review_state="approved", corrected_class_name="bunny")
+
+    export_payload = _exporter(tmp_path).export_reviewed_dataset(export_stamp="20260405_phase3_01")
+    assert export_payload["exported_count"] == 1
+    item = export_payload["items"][0]
+    assert item["effective_class_name"] == "bunny"
+    assert item["image_path"].startswith("images/bunny/")
+    # Phase 2/3 metadata passthrough
+    assert "capture_reason" in item
+    assert "is_rabbit_alias" in item
+    assert "sample_kind" in item
+    assert "visibility_state" in item
+    assert "bbox_review_state" in item
+
+
+def test_review_schema_fields_persist_through_update(tmp_path):
+    """Phase 3 review schema fields can be set and persisted."""
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(class_name="cat", track_id=55)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    updated = queue.update_candidate(
+        record["candidate_id"],
+        sample_kind="hard_case",
+        visibility_state="partial",
+        bbox_review_state="needs_annotation",
+    )
+    reloaded = _review_queue(tmp_path).get_candidate(record["candidate_id"])
+
+    assert updated["sample_kind"] == "hard_case"
+    assert updated["visibility_state"] == "partial"
+    assert updated["bbox_review_state"] == "needs_annotation"
+    assert reloaded["sample_kind"] == "hard_case"
+    assert reloaded["visibility_state"] == "partial"
+    assert reloaded["bbox_review_state"] == "needs_annotation"
+
+
+def test_review_schema_fields_default_safely_for_old_metadata(tmp_path):
+    """Older v1 metadata lacking Phase 2/3 fields still loads with safe defaults."""
+    # Manually write a v1 metadata file without Phase 2/3 fields
+    import os
+    meta_dir = tmp_path / "data" / "candidates" / "metadata" / "2026" / "01" / "01"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    v1_payload = {
+        "version": 1,
+        "candidate_id": "v1_legacy_test",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "class_name": "cat",
+        "raw_class_name": "cat",
+        "identity_label": None,
+        "review_state": "unreviewed",
+        "reviewed_at": None,
+        "corrected_class_name": None,
+        "track_id": 99,
+        "track_hits": 5,
+        "bbox_norm": [0.1, 0.1, 0.5, 0.5],
+        "bbox_pixels": [32, 24, 160, 120],
+        "confidence": 0.80,
+        "crop_path": "images/2026/01/01/v1_legacy_test.bmp",
+        "frame_path": None,
+        "source": {"camera_backend": "auto", "frame_source": "detect_worker", "frame_width": 320, "frame_height": 240},
+        "quality": {"crop_width": 128, "crop_height": 96, "brightness": 120.0, "blur_estimate": 100.0, "pixel_stddev": 45.0, "face_visible": None},
+        "tracking": {"display_class": None, "display_label": None, "display_class_reason": None},
+    }
+    (meta_dir / "v1_legacy_test.json").write_text(
+        json.dumps(v1_payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    queue = _review_queue(tmp_path)
+    loaded = queue.get_candidate("v1_legacy_test")
+
+    # Phase 2 fields default safely
+    assert loaded["capture_reason"] == "detected_track"
+    assert loaded["is_rabbit_alias"] is False
+    assert loaded["detector_coco_class_id"] is None
+    assert loaded["full_frame_retained"] is False
+    assert loaded["bbox_edge_touch"] is None
+
+    # Phase 3 fields default safely
+    assert loaded["sample_kind"] == "detector_positive"
+    assert loaded["visibility_state"] == "unknown"
+    assert loaded["bbox_review_state"] == "detector_box_ok"
+
+
+# ── Phase 4: fallback capture tests ──────────────────────────────────────────
+
+
+def _fallback_signal(**overrides) -> dict:
+    """Return a minimal fallback signal dict as produced by BunnyMovementTracker."""
+    sig = {
+        "track_id": 42,
+        "last_cx": 0.5,
+        "last_cy": 0.5,
+        "last_seen": 95.0,
+        "elapsed_sec": 5.0,
+        "bunny_hits": 12,
+    }
+    sig.update(overrides)
+    return sig
+
+
+def test_fallback_saves_candidate_on_valid_signal(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    frame = _frame()
+
+    result = collector.collect_fallback(
+        frame, _fallback_signal(), frame_source="test_fallback", captured_at=200.0,
+    )
+
+    assert result is not None
+    assert result["capture_reason"] == "fallback_recent_bunny_track"
+    assert result["sample_kind"] == "hard_case"
+    assert result["bbox_review_state"] == "proposal_only"
+    assert result["visibility_state"] == "unknown"
+    assert result["full_frame_retained"] is True
+    assert result["confidence"] == 0.0
+    assert result["class_name"] == "cat"
+    assert result["is_rabbit_alias"] is False  # not from detector – manual proposal
+    assert result["detector_coco_class_id"] is None
+    assert result["fallback_signal"]["elapsed_sec"] == 5.0
+    assert result["fallback_signal"]["bunny_hits"] == 12
+
+    # Files written
+    metas = _metadata_files(tmp_path)
+    assert len(metas) == 1
+    payload = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert payload["capture_reason"] == "fallback_recent_bunny_track"
+
+    # Crop + frame paths exist
+    root = tmp_path / "data" / "candidates"
+    assert (root / payload["crop_path"]).exists()
+    assert (root / payload["frame_path"]).exists()
+
+    status = collector.get_status()
+    assert status["fallback_saved_total"] == 1
+    assert status["saved_total"] == 1
+
+
+def test_fallback_respects_cooldown(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=30.0)
+    frame = _frame()
+    sig = _fallback_signal()
+
+    # First save succeeds
+    assert collector.collect_fallback(frame, sig, captured_at=100.0) is not None
+    # Second within cooldown blocked
+    assert collector.collect_fallback(frame, sig, captured_at=125.0) is None
+    # After cooldown passes
+    assert collector.collect_fallback(frame, sig, captured_at=131.0) is not None
+
+    assert collector.get_status()["fallback_saved_total"] == 2
+
+
+def test_fallback_respects_session_cap(tmp_path):
+    collector = _collector(tmp_path, fallback_max_per_session=2, fallback_cooldown_sec=0.0)
+    frame = _frame()
+    sig = _fallback_signal()
+
+    assert collector.collect_fallback(frame, sig, captured_at=100.0) is not None
+    assert collector.collect_fallback(frame, sig, captured_at=101.0) is not None
+    assert collector.collect_fallback(frame, sig, captured_at=102.0) is None  # capped
+
+    assert collector.get_status()["fallback_saved_total"] == 2
+
+
+def test_fallback_rejects_too_soon_signal(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0, fallback_min_elapsed_sec=2.0)
+    frame = _frame()
+    sig = _fallback_signal(elapsed_sec=0.5)
+
+    result = collector.collect_fallback(frame, sig, captured_at=100.0)
+    assert result is None
+    assert collector.get_status()["skipped_reasons"].get("fallback_too_soon", 0) == 1
+
+
+def test_fallback_rejects_too_stale_signal(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0, fallback_max_elapsed_sec=60.0)
+    frame = _frame()
+    sig = _fallback_signal(elapsed_sec=120.0)
+
+    result = collector.collect_fallback(frame, sig, captured_at=100.0)
+    assert result is None
+    assert collector.get_status()["skipped_reasons"].get("fallback_too_stale", 0) == 1
+
+
+def test_fallback_disabled_returns_none(tmp_path):
+    collector = _collector(tmp_path, fallback_enabled=False)
+    frame = _frame()
+
+    result = collector.collect_fallback(frame, _fallback_signal(), captured_at=100.0)
+    assert result is None
+    assert collector.get_status()["fallback_enabled"] is False
+
+
+def test_fallback_none_frame_returns_none(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+
+    result = collector.collect_fallback(None, _fallback_signal(), captured_at=100.0)
+    assert result is None
+
+
+def test_fallback_empty_signal_returns_none(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+
+    assert collector.collect_fallback(_frame(), {}, captured_at=100.0) is None
+    assert collector.collect_fallback(_frame(), None, captured_at=100.0) is None
+
+
+def test_fallback_does_not_affect_normal_collect(tmp_path):
+    """Normal detector-positive collection still works after fallback saves."""
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    frame = _frame()
+
+    fb = collector.collect_fallback(frame, _fallback_signal(), captured_at=100.0)
+    assert fb is not None
+
+    records = collector.collect(frame, [_detection(track_hits=3)], captured_at=110.0)
+    assert len(records) == 1
+    assert records[0]["capture_reason"] == "detected_track"
+
+    assert collector.get_status()["saved_total"] == 2
+    assert collector.get_status()["fallback_saved_total"] == 1

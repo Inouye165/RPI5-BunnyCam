@@ -1170,10 +1170,14 @@ def _run(frame_rgb: np.ndarray) -> list[dict]:
     # so that sticky labels survive frames with no face match.
     _tracker.update(dets)
 
-    # Strip any remaining internal key (safety net).
+    # Expose rabbit-alias provenance for candidate collection metadata,
+    # then strip remaining internal keys.
     for d in dets:
         d.pop("_face_dist", None)
-        d.pop("_raw_class_index", None)
+        raw_idx = d.pop("_raw_class_index", None)
+        d["is_rabbit_alias"] = raw_idx is not None and raw_idx in RABBIT_ALIAS_CLASSES
+        if raw_idx is not None:
+            d["detector_coco_class_id"] = raw_idx
 
     return dets
 
@@ -1212,6 +1216,18 @@ def _worker(get_frame_fn: Callable) -> None:
                     captured_at=time.time(),
                 )
                 _movement_tracker.update(dets)
+
+                # Phase 4: fallback capture when bunny recently lost.
+                has_cat_det = any(d.get("class_name") == "cat" for d in dets)
+                if not has_cat_det:
+                    fb_signal = _movement_tracker.get_fallback_signal(dets)
+                    if fb_signal is not None:
+                        _candidate_collector.collect_fallback(
+                            frame,
+                            fb_signal,
+                            frame_source="detect_worker_fallback",
+                            captured_at=time.time(),
+                        )
                 with _lock:
                     _latest["detections"] = dets
                     _latest["ts"]         = time.time()

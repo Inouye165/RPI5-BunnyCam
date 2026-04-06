@@ -10,7 +10,13 @@ from typing import Any
 
 REVIEW_STATES = ("unreviewed", "approved", "rejected")
 IDENTITY_FILTERS = ("all", "present", "missing")
-SUPPORTED_CLASSES = ("person", "dog", "cat")
+SUPPORTED_CLASSES = ("person", "dog", "cat", "bunny")
+
+# Review schema fields added in Phase 3.  These have safe defaults so older
+# candidate metadata that lacks them still loads correctly.
+SAMPLE_KINDS = ("detector_positive", "detector_negative", "hard_case", "ignore", "identity_only")
+VISIBILITY_STATES = ("full", "partial", "obstructed", "rear_view", "blurry", "unknown")
+BBOX_REVIEW_STATES = ("detector_box_ok", "proposal_only", "needs_annotation", "corrected")
 _UNSET = object()
 
 
@@ -82,6 +88,9 @@ class CandidateReviewQueue:
         review_state: str | object = _UNSET,
         identity_label: str | None | object = _UNSET,
         corrected_class_name: str | None | object = _UNSET,
+        sample_kind: str | None | object = _UNSET,
+        visibility_state: str | None | object = _UNSET,
+        bbox_review_state: str | None | object = _UNSET,
     ) -> dict[str, Any]:
         metadata_path = self._find_metadata_path(candidate_id)
         if metadata_path is None:
@@ -105,6 +114,15 @@ class CandidateReviewQueue:
 
             if corrected_class_name is not _UNSET:
                 payload["corrected_class_name"] = self._normalize_corrected_class(corrected_class_name)
+
+            if sample_kind is not _UNSET:
+                payload["sample_kind"] = self._normalize_enum(sample_kind, SAMPLE_KINDS, "sample_kind")
+
+            if visibility_state is not _UNSET:
+                payload["visibility_state"] = self._normalize_enum(visibility_state, VISIBILITY_STATES, "visibility_state")
+
+            if bbox_review_state is not _UNSET:
+                payload["bbox_review_state"] = self._normalize_enum(bbox_review_state, BBOX_REVIEW_STATES, "bbox_review_state")
 
             _json_write(metadata_path, payload)
             candidates = self._load_all_candidates()
@@ -173,6 +191,18 @@ class CandidateReviewQueue:
         candidate["metadata_path"] = self._relative_path(metadata_path)
         candidate["crop_path"] = str(payload.get("crop_path", ""))
         candidate["frame_path"] = payload.get("frame_path")
+
+        # Phase 2 instrumentation fields — default safely for older metadata.
+        candidate.setdefault("capture_reason", "detected_track")
+        candidate.setdefault("is_rabbit_alias", False)
+        candidate.setdefault("detector_coco_class_id", None)
+        candidate.setdefault("full_frame_retained", payload.get("frame_path") is not None)
+        candidate.setdefault("bbox_edge_touch", None)
+
+        # Phase 3 review schema fields — default safely when absent.
+        candidate.setdefault("sample_kind", "detector_positive")
+        candidate.setdefault("visibility_state", "unknown")
+        candidate.setdefault("bbox_review_state", "detector_box_ok")
         return candidate
 
     def _normalize_state(self, value: Any) -> str:
@@ -196,6 +226,16 @@ class CandidateReviewQueue:
         if class_name not in SUPPORTED_CLASSES:
             raise ValueError(f"unsupported class '{class_name}'")
         return class_name
+
+    def _normalize_enum(self, value: Any, allowed: tuple[str, ...], field_name: str) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return None
+        if normalized not in allowed:
+            raise ValueError(f"unsupported {field_name} '{normalized}'")
+        return normalized
 
     def _matches(
         self,

@@ -97,6 +97,12 @@ class ReviewedDatasetExporter:
                 "bbox_pixels": item.get("bbox_pixels"),
                 "confidence": item.get("confidence"),
                 "source": item.get("source"),
+                # Phase 2/3 metadata — present when available, None for older items.
+                "capture_reason": item.get("capture_reason"),
+                "is_rabbit_alias": item.get("is_rabbit_alias"),
+                "sample_kind": item.get("sample_kind"),
+                "visibility_state": item.get("visibility_state"),
+                "bbox_review_state": item.get("bbox_review_state"),
             })
 
         manifest = {

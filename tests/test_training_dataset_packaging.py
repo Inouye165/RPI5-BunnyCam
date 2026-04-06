@@ -181,3 +181,70 @@ def test_training_packager_status_tracks_latest_package(tmp_path):
     assert status["package_name"] == "20260326_072040"
     assert status["detection"]["item_count"] == 1
     assert status["identity"]["item_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — bunny class support in training packaging
+# ---------------------------------------------------------------------------
+
+def test_bunny_detection_packaging_assigns_correct_class_id(tmp_path):
+    """Bunny-corrected approved items are packaged with the bunny class ID."""
+    collector = _collector(tmp_path, save_full_frame=True)
+    record = collector.collect(
+        _frame(), [_detection(class_name="cat", track_id=151)], captured_at=100.0
+    )[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+        identity_label="Bun-bun",
+    )
+
+    payload = _packager(tmp_path).package_training_datasets(package_stamp="20260405_phase3_det")
+    manifest = json.loads(Path(payload["detection"]["manifest_path"]).read_text(encoding="utf-8"))
+
+    assert payload["detection"]["item_count"] == 1
+    assert payload["detection"]["class_counts"] == {"bunny": 1}
+    item = manifest["items"][0]
+    assert item["class_name"] == "bunny"
+
+    # Verify the YOLO label file has the correct class ID (bunny = 3)
+    label_path = Path(payload["detection"]["dataset_path"]) / item["label_path"]
+    label_content = label_path.read_text(encoding="utf-8").strip()
+    assert label_content.startswith("3 ")
+
+    # dataset.yaml mentions bunny
+    yaml_path = Path(payload["detection"]["dataset_yaml_path"])
+    yaml_content = yaml_path.read_text(encoding="utf-8")
+    assert "bunny" in yaml_content
+
+
+def test_bunny_identity_packaging_works(tmp_path):
+    """Approved labeled bunny items flow through identity packaging."""
+    collector = _collector(tmp_path)
+    record = collector.collect(
+        _frame(), [_detection(class_name="cat", track_id=152)], captured_at=100.0
+    )[0]
+    queue = _review_queue(tmp_path)
+    queue.update_candidate(
+        record["candidate_id"],
+        review_state="approved",
+        corrected_class_name="bunny",
+        identity_label="Bun-bun",
+    )
+
+    payload = _packager(tmp_path).package_training_datasets(package_stamp="20260405_phase3_id")
+
+    assert payload["identity"]["item_count"] == 1
+    assert payload["identity"]["identity_counts"] == {"Bun-bun": 1}
+    assert payload["identity"]["class_counts"] == {"bunny": 1}
+
+
+def test_existing_person_dog_cat_packaging_unaffected_by_bunny_addition(tmp_path):
+    """Adding bunny to SUPPORTED_CLASSES does not change existing class IDs for person/dog/cat."""
+    from training_dataset import DETECTION_CLASS_IDS
+    assert DETECTION_CLASS_IDS["person"] == 0
+    assert DETECTION_CLASS_IDS["dog"] == 1
+    assert DETECTION_CLASS_IDS["cat"] == 2
+    assert DETECTION_CLASS_IDS["bunny"] == 3
