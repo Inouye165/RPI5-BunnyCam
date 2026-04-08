@@ -55,14 +55,28 @@ class CandidateReviewQueue:
         review_state: str | None = None,
         class_name: str | None = None,
         identity_filter: str = "all",
+        capture_reason: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         candidates = self._load_all_candidates()
         self._sync_review_manifests(candidates)
 
         filtered = [
             candidate for candidate in candidates
-            if self._matches(candidate, review_state=review_state, class_name=class_name, identity_filter=identity_filter)
+            if self._matches(
+                candidate,
+                review_state=review_state,
+                class_name=class_name,
+                identity_filter=identity_filter,
+                capture_reason=capture_reason,
+            )
         ]
+        normalized_limit = self._normalize_limit(limit)
+        normalized_offset = self._normalize_offset(offset)
+        paged_items = filtered[normalized_offset:]
+        if normalized_limit is not None:
+            paged_items = paged_items[:normalized_limit]
 
         summary = {
             "total": len(candidates),
@@ -72,12 +86,19 @@ class CandidateReviewQueue:
             "labeled": sum(1 for item in candidates if item["has_identity_label"]),
         }
         return {
-            "items": filtered,
+            "items": paged_items,
             "total": len(filtered),
+            "returned": len(paged_items),
             "summary": summary,
             "available_states": list(REVIEW_STATES),
             "available_classes": list(SUPPORTED_CLASSES),
             "available_identity_filters": list(IDENTITY_FILTERS),
+            "available_capture_reasons": sorted({str(item.get("capture_reason") or "unknown") for item in candidates}),
+            "capture_reason": self._normalize_capture_reason(capture_reason),
+            "limit": normalized_limit,
+            "offset": normalized_offset,
+            "has_next": (normalized_offset + len(paged_items)) < len(filtered),
+            "has_previous": normalized_offset > 0,
             "review_root": self._relative_path(self.review_root),
         }
 
@@ -191,6 +212,8 @@ class CandidateReviewQueue:
         candidate["metadata_path"] = self._relative_path(metadata_path)
         candidate["crop_path"] = str(payload.get("crop_path", ""))
         candidate["frame_path"] = payload.get("frame_path")
+        candidate["crop_exists"] = self._asset_exists(candidate["crop_path"])
+        candidate["frame_exists"] = self._asset_exists(candidate["frame_path"])
 
         # Phase 2 instrumentation fields — default safely for older metadata.
         candidate.setdefault("capture_reason", "detected_track")
@@ -244,10 +267,12 @@ class CandidateReviewQueue:
         review_state: str | None,
         class_name: str | None,
         identity_filter: str,
+        capture_reason: str | None,
     ) -> bool:
         normalized_state = None if not review_state or review_state == "all" else self._normalize_state(review_state)
         normalized_class = None if not class_name or class_name == "all" else self._normalize_corrected_class(class_name)
         normalized_identity = identity_filter if identity_filter in IDENTITY_FILTERS else "all"
+        normalized_capture_reason = self._normalize_capture_reason(capture_reason)
 
         if normalized_state and candidate["review_state"] != normalized_state:
             return False
@@ -257,7 +282,29 @@ class CandidateReviewQueue:
             return False
         if normalized_identity == "missing" and candidate["has_identity_label"]:
             return False
+        if normalized_capture_reason and str(candidate.get("capture_reason") or "") != normalized_capture_reason:
+            return False
         return True
+
+    def _normalize_capture_reason(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        return normalized or None
+
+    def _normalize_limit(self, value: Any) -> int | None:
+        if value in (None, "", 0, "0"):
+            return None
+        limit = int(value)
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        return min(limit, 200)
+
+    def _normalize_offset(self, value: Any) -> int:
+        offset = int(value or 0)
+        if offset < 0:
+            raise ValueError("offset must be 0 or greater")
+        return offset
 
     def _sync_review_manifests(self, candidates: list[dict[str, Any]]) -> None:
         approved = [self._manifest_entry(item) for item in candidates if item["review_state"] == "approved"]
@@ -288,3 +335,17 @@ class CandidateReviewQueue:
 
     def _relative_path(self, path: str) -> str:
         return os.path.relpath(path, self.storage_root).replace(os.sep, "/")
+
+    def _asset_exists(self, relative_path: Any) -> bool:
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            return False
+
+        normalized = os.path.normpath(relative_path).replace("\\", os.sep)
+        candidate_path = os.path.abspath(os.path.join(self.storage_root, normalized))
+        storage_abs = os.path.abspath(self.storage_root)
+        try:
+            if os.path.commonpath([candidate_path, storage_abs]) != storage_abs:
+                return False
+        except ValueError:
+            return False
+        return os.path.isfile(candidate_path)

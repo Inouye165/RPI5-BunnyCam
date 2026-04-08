@@ -992,6 +992,7 @@ def _load_template(name: str) -> str:
 
 INDEX_HTML = _load_template("index.html")
 REVIEW_HTML = _load_template("review.html")
+BROWSER_HTML = _load_template("candidate_browser.html")
 
 
 def _render_html(template_text: str) -> str:
@@ -1006,6 +1007,11 @@ def index():
 @app.get("/review")
 def review_page():
     return _render_html(REVIEW_HTML)
+
+
+@app.get("/review/browser")
+def review_browser_page():
+    return _render_html(BROWSER_HTML)
 
 
 @app.get("/favicon.svg")
@@ -1125,12 +1131,33 @@ def _review_candidate_with_urls(candidate: dict) -> dict:
     crop_path = candidate.get("crop_path")
     frame_path = candidate.get("frame_path")
     payload["crop_url"] = (
-        f"/candidate-collection/assets/{quote(str(crop_path), safe='/')}" if crop_path else None
+        f"/candidate-collection/assets/{quote(str(crop_path), safe='/')}"
+        if crop_path and candidate.get("crop_exists", True)
+        else None
     )
     payload["frame_url"] = (
-        f"/candidate-collection/assets/{quote(str(frame_path), safe='/')}" if frame_path else None
+        f"/candidate-collection/assets/{quote(str(frame_path), safe='/')}"
+        if frame_path and candidate.get("frame_exists", True)
+        else None
     )
     return payload
+
+
+def _request_int_arg(name: str, *, default: int | None = None, minimum: int | None = None, maximum: int | None = None) -> int | None:
+    raw_value = request.args.get(name)
+    if raw_value in (None, ""):
+        return default
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return value
 
 
 def _to_repo_relative_path(path: str) -> str:
@@ -1625,11 +1652,18 @@ def alarm_status():
 
 @app.get("/api/review/candidates")
 def review_candidates_list():
-    payload = _review_queue.list_candidates(
-        review_state=request.args.get("state"),
-        class_name=request.args.get("class"),
-        identity_filter=request.args.get("identity", "all"),
-    )
+    try:
+        payload = _review_queue.list_candidates(
+            review_state=request.args.get("state"),
+            class_name=request.args.get("class"),
+            identity_filter=request.args.get("identity", "all"),
+            capture_reason=request.args.get("capture_reason"),
+            limit=_request_int_arg("limit", minimum=1, maximum=200),
+            offset=_request_int_arg("offset", default=0, minimum=0),
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
     payload["items"] = [_review_candidate_with_urls(item) for item in payload["items"]]
     return jsonify(payload)
 
