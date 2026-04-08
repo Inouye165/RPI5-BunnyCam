@@ -181,7 +181,7 @@ For the exact Raspberry Pi operator procedure for Phase 7 validation, see
 
 The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
 
-The candidate browser is a separate read-only page under `GET /review/browser`. It reads directly from the saved filesystem artifacts in `data/candidates/images/...`, `data/candidates/frames/...`, and `data/candidates/metadata/...`, shows newest items first, and supports low-risk filtering by class and capture reason plus paginated browsing so the Pi does not try to render the full archive at once.
+The candidate browser is a separate low-risk curation page under `GET /review/browser`. It reads directly from the saved filesystem artifacts in `data/candidates/images/...`, `data/candidates/frames/...`, and `data/candidates/metadata/...`, shows newest items first, and supports low-risk filtering by class and capture reason plus paginated browsing so the Pi does not try to render the full archive at once. Its only write actions are authoritative `identity_label` and `corrected_class_name` saves through the same `POST /api/review/candidates/<candidate_id>/review` path used by the review queue; approval and rejection stay in the review queue flow.
 
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
 

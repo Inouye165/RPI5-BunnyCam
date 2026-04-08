@@ -361,6 +361,8 @@ def test_candidate_browser_page_route(monkeypatch):
 
     assert response.status_code == 200
     assert b"Candidate Browser" in response.data
+    assert b"Authoritative label corrections" in response.data
+    assert b"Open Review Queue" in response.data
     assert b"v0.3.0 (main@abc1234)" in response.data
 
 
@@ -546,6 +548,25 @@ def test_review_candidate_label_update_route(monkeypatch):
     payload = response.get_json()
     assert payload["candidate"]["identity_label"] == "Dobby"
     assert calls == [("candidate-3", {"identity_label": "Dobby", "corrected_class_name": "dog"})]
+
+
+def test_review_candidate_label_update_route_returns_validation_error(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+
+    def _raise_validation_error(_candidate_id, **_kwargs):
+        raise ValueError("unsupported class 'fox'")
+
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(update_candidate=_raise_validation_error))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.post("/api/review/candidates/candidate-3/review", json={
+        "identity_label": "Dobby",
+        "corrected_class_name": "fox",
+    })
+
+    assert response.status_code == 400
+    assert response.get_json() == {"ok": False, "error": "unsupported class 'fox'"}
 
 
 def test_review_export_route(monkeypatch):

@@ -65,7 +65,8 @@
     }
     .nav-link,
     button,
-    select {
+    select,
+    input {
       font: inherit;
       border-radius: 12px;
       border: 1px solid var(--border);
@@ -289,6 +290,67 @@
       line-height: 1.4;
       word-break: break-word;
     }
+    .editor-panel {
+      display: grid;
+      gap: 10px;
+      margin: 0 14px 14px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, #f9fbfd 0%, #eef4fa 100%);
+    }
+    .editor-copy {
+      display: grid;
+      gap: 4px;
+    }
+    .editor-copy strong {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .editor-copy span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .browser-editor {
+      display: grid;
+      gap: 10px;
+    }
+    .editor-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .editor-field {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .editor-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .secondary-link {
+      font-size: 12px;
+      padding: 9px 12px;
+    }
+    .browser-status {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .browser-status[data-state="error"] {
+      color: #b91c1c;
+    }
+    .browser-status[data-state="pending"] {
+      color: var(--accent);
+    }
     .card-foot {
       display: flex;
       justify-content: space-between;
@@ -325,6 +387,7 @@
       .summary {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
+      .editor-grid,
       .media-strip,
       .meta-grid {
         grid-template-columns: 1fr;
@@ -357,7 +420,7 @@
     <header class="header">
       <div>
         <h1>Candidate Browser</h1>
-        <p>Read-only browser for saved candidate crops, retained frames, and metadata from <code>data/candidates</code>. This slice keeps browsing separate from tagging so future naming and annotation actions can attach cleanly to the same candidate IDs.</p>
+        <p>Read-mostly browser for saved candidate crops, retained frames, and metadata from <code>data/candidates</code>. Compact identity and class corrections save through the existing review API, while approval and rejection stay in the Review Queue.</p>
       </div>
       <div class="header-tools">
         <span class="version-pill">__APP_VERSION__</span>
@@ -419,6 +482,7 @@
       limit: 24,
       offset: 0,
       total: 0,
+      availableClasses: [],
       loading: false,
     };
 
@@ -460,6 +524,21 @@
         return String(value);
       }
       return parsed.toLocaleString();
+    }
+
+    function reviewQueueHref(candidateId) {
+      return `/review?candidate_id=${encodeURIComponent(candidateId)}`;
+    }
+
+    function buildCorrectedClassOptions(selectedValue) {
+      const normalizedSelected = selectedValue || '';
+      const values = state.availableClasses.length ? state.availableClasses : ['person', 'dog', 'cat', 'bunny'];
+      const options = ['<option value="">Keep detected class</option>'];
+      for (const value of values) {
+        const selectedAttr = value === normalizedSelected ? ' selected' : '';
+        options.push(`<option value="${escapeHtml(value)}"${selectedAttr}>${escapeHtml(value)}</option>`);
+      }
+      return options.join('');
     }
 
     function buildQuery() {
@@ -526,6 +605,7 @@
 
     function renderCard(item) {
       const effectiveClass = item.corrected_class_name || item.class_name || 'unknown';
+      const reviewHref = reviewQueueHref(item.candidate_id);
       const cropMarkup = item.crop_url
         ? `<img src="${escapeHtml(item.crop_url)}" alt="Candidate crop for ${escapeHtml(item.candidate_id)}" loading="lazy"/>`
         : '<div class="media-empty">Crop file is missing.</div>';
@@ -566,9 +646,32 @@
             <div class="meta-card"><span>Rabbit alias</span><strong>${escapeHtml(formatValue(item.is_rabbit_alias))}</strong></div>
             <div class="meta-card"><span>Frame retained</span><strong>${escapeHtml(formatValue(item.full_frame_retained))}</strong></div>
           </div>
+          <div class="editor-panel">
+            <div class="editor-copy">
+              <strong>Authoritative label corrections</strong>
+              <span>Saves go through the existing review metadata path for this candidate ID. Use the Review Queue for approve or reject decisions.</span>
+            </div>
+            <form class="browser-editor" data-candidate-id="${escapeHtml(item.candidate_id)}">
+              <div class="editor-grid">
+                <label class="editor-field">
+                  Identity label
+                  <input name="identity_label" type="text" maxlength="64" value="${escapeHtml(item.identity_label || '')}" placeholder="Ron, Dobby, Hazel"/>
+                </label>
+                <label class="editor-field">
+                  Corrected class
+                  <select name="corrected_class_name">${buildCorrectedClassOptions(item.corrected_class_name)}</select>
+                </label>
+              </div>
+              <div class="editor-actions">
+                <button class="browser-save-btn" type="submit">Save labels</button>
+                <a class="nav-link secondary-link" href="${escapeHtml(reviewHref)}">Open Review Queue</a>
+                <span class="browser-status" data-status-for="${escapeHtml(item.candidate_id)}" aria-live="polite"></span>
+              </div>
+            </form>
+          </div>
           <div class="card-foot">
             <code>${escapeHtml(item.metadata_path || 'metadata unavailable')}</code>
-            <span>Future naming/tagging can attach to this candidate ID through the existing review API.</span>
+            <span>Browser edits are authoritative for labels and corrected class only; review state still belongs to the Review Queue flow.</span>
           </div>
         </article>
       `;
@@ -585,6 +688,7 @@
 
     function renderPayload(payload) {
       state.total = payload.total || 0;
+      state.availableClasses = payload.available_classes || [];
       document.getElementById('filteredCount').textContent = String(payload.total || 0);
       document.getElementById('summaryTotal').textContent = String(payload.summary?.total || 0);
       document.getElementById('summaryUnreviewed').textContent = String(payload.summary?.unreviewed || 0);
@@ -638,6 +742,41 @@
       loadCandidates();
     });
 
+
+    async function saveBrowserEdit(form) {
+      const candidateId = form.dataset.candidateId;
+      const saveButton = form.querySelector('.browser-save-btn');
+      const statusEl = form.querySelector('.browser-status');
+      const formData = new FormData(form);
+      const payload = {
+        identity_label: formData.get('identity_label') || '',
+        corrected_class_name: formData.get('corrected_class_name') || '',
+      };
+
+      saveButton.disabled = true;
+      statusEl.dataset.state = 'pending';
+      statusEl.textContent = 'Saving...';
+
+      try {
+        const response = await fetch(`/api/review/candidates/${encodeURIComponent(candidateId)}/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || 'Save failed.');
+        }
+
+        resultsNote.textContent = `Saved authoritative browser edits for ${candidateId}.`;
+        await loadCandidates();
+      } catch (error) {
+        statusEl.dataset.state = 'error';
+        statusEl.textContent = error.message || 'Save failed.';
+      } finally {
+        saveButton.disabled = false;
+      }
+    }
     captureReasonFilter.addEventListener('change', () => {
       state.captureReason = captureReasonFilter.value;
       state.offset = 0;
@@ -662,6 +801,15 @@
     nextBtn.addEventListener('click', () => {
       state.offset += state.limit;
       loadCandidates();
+    });
+
+    resultsGrid.addEventListener('submit', (event) => {
+      const form = event.target.closest('.browser-editor');
+      if (!form) {
+        return;
+      }
+      event.preventDefault();
+      saveBrowserEdit(form);
     });
 
     applyUrlState();
