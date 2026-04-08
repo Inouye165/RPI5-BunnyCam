@@ -308,12 +308,21 @@ def _make_review_item(**overrides):
         "effective_class_name": "person",
         "review_state": "unreviewed",
         "identity_label": None,
+        "corrected_class_name": None,
         "track_id": 1,
         "track_hits": 3,
         "confidence": 0.9,
         "crop_path": "images/2026/03/26/sample.bmp",
         "frame_path": None,
         "metadata_path": "metadata/2026/03/26/sample.json",
+        "capture_reason": "detected_track",
+        "sample_kind": "detector_positive",
+        "visibility_state": "full",
+        "bbox_review_state": "detector_box_ok",
+        "is_rabbit_alias": False,
+        "full_frame_retained": False,
+        "crop_exists": True,
+        "frame_exists": False,
     }
     payload.update(overrides)
     return payload
@@ -337,6 +346,24 @@ def test_review_page_route(monkeypatch):
     assert b"v0.3.0 (main@abc1234)" in response.data
 
 
+def test_candidate_browser_page_route(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_app_version_info", {
+        "version": "0.3.0",
+        "branch": "main",
+        "commit": "abc1234",
+        "display": "v0.3.0 (main@abc1234)",
+    })
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/review/browser")
+
+    assert response.status_code == 200
+    assert b"Candidate Browser" in response.data
+    assert b"v0.3.0 (main@abc1234)" in response.data
+
+
 def test_main_page_renders_version_badge(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
     monkeypatch.setattr(module, "_app_version_info", {
@@ -352,6 +379,7 @@ def test_main_page_renders_version_badge(monkeypatch):
 
     assert response.status_code == 200
     assert b"v0.3.0 (main@abc1234)" in response.data
+    assert b"Candidate Browser" in response.data
 
 
 def test_main_page_includes_live_enroll_selection_persistence_guards(monkeypatch):
@@ -374,23 +402,82 @@ def test_main_page_includes_live_enroll_selection_persistence_guards(monkeypatch
 
 def test_review_candidates_list_route(monkeypatch):
     module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
-    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
-        list_candidates=lambda **_kwargs: {
-            "items": [_make_review_item()],
+    calls = []
+
+    def _list_candidates(**kwargs):
+        calls.append(kwargs)
+        return {
+            "items": [_make_review_item(frame_path="frames/2026/03/26/sample.bmp", frame_exists=False)],
             "total": 1,
+            "returned": 1,
+            "offset": 24,
+            "limit": 24,
+            "has_next": False,
+            "has_previous": True,
+            "available_capture_reasons": ["detected_track", "fallback_recent_bunny_track"],
             "summary": {"total": 1, "unreviewed": 1, "approved": 0, "rejected": 0, "labeled": 0},
         }
-    ))
+
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(list_candidates=_list_candidates))
     app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
     client = app.test_client()
 
-    response = client.get("/api/review/candidates?state=unreviewed&class=person&identity=missing")
+    response = client.get(
+        "/api/review/candidates?state=unreviewed&class=person&identity=missing&capture_reason=detected_track&limit=24&offset=24"
+    )
 
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["total"] == 1
     assert payload["items"][0]["candidate_id"].startswith("20260326T")
     assert payload["items"][0]["crop_url"].endswith("images/2026/03/26/sample.bmp")
+    assert payload["items"][0]["frame_url"] is None
+    assert calls == [{
+        "review_state": "unreviewed",
+        "class_name": "person",
+        "identity_filter": "missing",
+        "capture_reason": "detected_track",
+        "limit": 24,
+        "offset": 24,
+    }]
+
+
+def test_review_candidates_list_route_rejects_invalid_limit(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/candidates?limit=bad")
+
+    assert response.status_code == 400
+    assert response.get_json()["ok"] is False
+
+
+def test_review_candidates_list_route_handles_empty_state(monkeypatch):
+    module = _fresh_import_sec_cam(monkeypatch, backend_name="laptop")
+    monkeypatch.setattr(module, "_review_queue", types.SimpleNamespace(
+        list_candidates=lambda **_kwargs: {
+            "items": [],
+            "total": 0,
+            "returned": 0,
+            "offset": 0,
+            "limit": 24,
+            "has_next": False,
+            "has_previous": False,
+            "available_classes": ["person", "dog", "cat", "bunny"],
+            "available_capture_reasons": ["detected_track"],
+            "summary": {"total": 0, "unreviewed": 0, "approved": 0, "rejected": 0, "labeled": 0},
+        }
+    ))
+    app = module.create_app(camera_backend_override=FakeBackend(), testing=True)
+    client = app.test_client()
+
+    response = client.get("/api/review/candidates?limit=24")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["items"] == []
+    assert payload["total"] == 0
 
 
 def test_review_candidate_approve_route(monkeypatch):

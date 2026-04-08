@@ -159,6 +159,7 @@ Candidate collection artifacts:
 - `data/identity_gallery/pets/<identity>/gallery.json`: persistent promoted pet gallery metadata
 - `data/identity_gallery/pets/<identity>/samples/`: copied approved pet crops used for future identity work
 - `GET /candidate-collection/status`: lightweight saved-count and collector-config debug status
+- `GET /review/browser`: internal paginated browser for saved candidate crops, retained frames, and metadata
 - `GET /review`: lightweight review and labeling queue UI
 - `GET /api/version`: app version/build metadata for UI display and diagnostics
 - `GET /api/review/identity-gallery-status`: small promoted-gallery status summary
@@ -179,6 +180,8 @@ For the exact Raspberry Pi operator procedure for Phase 7 validation, see
 `docs/bunny-phase7-pi-validation.md`.
 
 The review queue updates the existing candidate metadata in place with durable `review_state`, `identity_label`, and optional `corrected_class_name` fields, then regenerates the approved and rejected manifests for later training/export phases.
+
+The candidate browser is a separate read-only page under `GET /review/browser`. It reads directly from the saved filesystem artifacts in `data/candidates/images/...`, `data/candidates/frames/...`, and `data/candidates/metadata/...`, shows newest items first, and supports low-risk filtering by class and capture reason plus paginated browsing so the Pi does not try to render the full archive at once.
 
 The app version is sourced from the repo-owned `VERSION` file and is enriched with git branch and short commit SHA when git metadata is available. The main page and review page both display the current build so it is obvious which code is running.
 

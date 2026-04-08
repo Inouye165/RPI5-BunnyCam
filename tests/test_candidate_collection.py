@@ -682,6 +682,47 @@ def test_review_schema_fields_default_safely_for_old_metadata(tmp_path):
     assert loaded["bbox_review_state"] == "detector_box_ok"
 
 
+def test_review_queue_marks_missing_frame_asset_unavailable(tmp_path):
+    candidate_root = tmp_path / "data" / "candidates"
+    image_dir = candidate_root / "images" / "2026" / "01" / "01"
+    metadata_dir = candidate_root / "metadata" / "2026" / "01" / "01"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    crop_path = image_dir / "asset_missing_test.jpg"
+    crop_path.write_bytes(b"crop")
+
+    payload = {
+        "version": 2,
+        "candidate_id": "asset_missing_test",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "class_name": "cat",
+        "raw_class_name": "cat",
+        "identity_label": None,
+        "review_state": "unreviewed",
+        "reviewed_at": None,
+        "corrected_class_name": None,
+        "track_id": 77,
+        "track_hits": 4,
+        "bbox_norm": [0.1, 0.2, 0.5, 0.8],
+        "bbox_pixels": [32, 48, 160, 192],
+        "confidence": 0.8,
+        "crop_path": "images/2026/01/01/asset_missing_test.jpg",
+        "frame_path": "frames/2026/01/01/asset_missing_test.jpg",
+        "source": {"camera_backend": "laptop", "frame_source": "detect_worker", "frame_width": 320, "frame_height": 240},
+        "quality": {"crop_width": 128, "crop_height": 144, "brightness": 80.0, "blur_estimate": 300.0, "pixel_stddev": 25.0, "face_visible": None},
+        "tracking": {"display_class": "cat", "display_label": None, "display_class_reason": "confirmed_pet"},
+    }
+    (metadata_dir / "asset_missing_test.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    loaded = CandidateReviewQueue(str(candidate_root)).get_candidate("asset_missing_test")
+
+    assert loaded["crop_exists"] is True
+    assert loaded["frame_exists"] is False
+
+
 # ── Phase 4: fallback capture tests ──────────────────────────────────────────
 
 
@@ -697,6 +738,33 @@ def _fallback_signal(**overrides) -> dict:
     }
     sig.update(overrides)
     return sig
+
+
+def test_review_queue_can_filter_by_capture_reason_and_paginate(tmp_path):
+    collector = _collector(tmp_path, fallback_cooldown_sec=0.0)
+    collector.collect(_frame(), [_detection(class_name="person", track_id=61)], captured_at=100.0)
+    first_fallback = collector.collect_fallback(
+        _frame(), _fallback_signal(track_id=62), frame_source="test_fallback", captured_at=200.0,
+    )
+    second_fallback = collector.collect_fallback(
+        _frame(), _fallback_signal(track_id=63), frame_source="test_fallback", captured_at=300.0,
+    )
+
+    assert first_fallback is not None
+    assert second_fallback is not None
+
+    payload = _review_queue(tmp_path).list_candidates(
+        capture_reason="fallback_recent_bunny_track",
+        limit=1,
+        offset=1,
+    )
+
+    assert payload["total"] == 2
+    assert payload["returned"] == 1
+    assert payload["has_previous"] is True
+    assert payload["has_next"] is False
+    assert payload["items"][0]["candidate_id"] == first_fallback["candidate_id"]
+    assert "fallback_recent_bunny_track" in payload["available_capture_reasons"]
 
 
 def test_fallback_saves_candidate_on_valid_signal(tmp_path):

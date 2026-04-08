@@ -1,0 +1,671 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <title>BunnyCam Candidate Browser</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #f3f5f8;
+      --panel: #ffffff;
+      --panel-alt: #edf2f7;
+      --border: #d7e0ea;
+      --text: #16202b;
+      --muted: #5a6776;
+      --accent: #1d4ed8;
+      --chip: #f8fafc;
+      --shadow: 0 14px 32px rgba(15, 23, 42, 0.06);
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #edf2f7 0%, #f8fafc 100%);
+    }
+    .page {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 12px;
+      padding: 16px;
+    }
+    .header,
+    .toolbar,
+    .summary {
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .header p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 780px;
+    }
+    .header-tools {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+    .nav-link,
+    button,
+    select {
+      font: inherit;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 9px 12px;
+    }
+    .nav-link {
+      text-decoration: none;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    button {
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: 0.55;
+    }
+    .version-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .toolbar {
+      display: grid;
+      gap: 12px;
+      padding: 14px 16px;
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+    }
+    .filters label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      min-width: 180px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+    }
+    .summary-card {
+      background: var(--panel-alt);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    .summary-card strong {
+      display: block;
+      font-size: 20px;
+    }
+    .summary-card span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .results {
+      display: grid;
+      gap: 12px;
+      min-height: 0;
+    }
+    .results-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .results-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .pagination {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 12px;
+      align-content: start;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: start;
+      padding: 14px 14px 0;
+    }
+    .card-head h2 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .card-head p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #edf2ff;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .media-strip {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 10px;
+      padding: 12px 14px 0;
+    }
+    .media-box {
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      min-height: 170px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .media-label {
+      padding: 8px 10px;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .media-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      background: #dbe5ef;
+    }
+    .media-empty {
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 12px 14px 0;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--chip);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 12px 14px 14px;
+    }
+    .meta-card {
+      background: var(--panel-alt);
+      border-radius: 12px;
+      padding: 10px;
+      min-height: 68px;
+    }
+    .meta-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+    .meta-card strong {
+      font-size: 13px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .card-foot {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 0 14px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+    .card-foot code {
+      background: rgba(15, 23, 42, 0.06);
+      border-radius: 8px;
+      padding: 3px 7px;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 11px;
+      color: #0f172a;
+    }
+    .empty-state {
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px dashed var(--border);
+      border-radius: 18px;
+      padding: 40px 24px;
+      text-align: center;
+      color: var(--muted);
+      box-shadow: var(--shadow);
+    }
+    .empty-state h2 {
+      margin: 0 0 8px;
+      color: var(--text);
+      font-size: 20px;
+    }
+    @media (max-width: 960px) {
+      .summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .media-strip,
+      .meta-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 640px) {
+      .page {
+        padding: 12px;
+      }
+      .header,
+      .results-head {
+        align-items: start;
+      }
+      .header,
+      .results-head,
+      .card-foot {
+        flex-direction: column;
+      }
+      .summary {
+        grid-template-columns: 1fr;
+      }
+      .filters label {
+        min-width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>Candidate Browser</h1>
+        <p>Read-only browser for saved candidate crops, retained frames, and metadata from <code>data/candidates</code>. This slice keeps browsing separate from tagging so future naming and annotation actions can attach cleanly to the same candidate IDs.</p>
+      </div>
+      <div class="header-tools">
+        <span class="version-pill">__APP_VERSION__</span>
+        <a class="nav-link" href="/review">Review Queue</a>
+        <a class="nav-link" href="/">Live View</a>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <div class="filters">
+        <label>
+          Class
+          <select id="classFilter">
+            <option value="all">All classes</option>
+          </select>
+        </label>
+        <label>
+          Capture reason
+          <select id="captureReasonFilter">
+            <option value="all">All reasons</option>
+          </select>
+        </label>
+        <label>
+          Page size
+          <select id="limitFilter">
+            <option value="12">12</option>
+            <option value="24" selected>24</option>
+            <option value="48">48</option>
+            <option value="96">96</option>
+          </select>
+        </label>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+      <div class="summary">
+        <div class="summary-card"><strong id="filteredCount">0</strong><span>Filtered</span></div>
+        <div class="summary-card"><strong id="summaryTotal">0</strong><span>Saved total</span></div>
+        <div class="summary-card"><strong id="summaryUnreviewed">0</strong><span>Unreviewed</span></div>
+        <div class="summary-card"><strong id="summaryLabeled">0</strong><span>Labeled</span></div>
+      </div>
+    </section>
+
+    <section class="results">
+      <div class="results-head">
+        <div class="results-note" id="resultsNote">Loading candidates...</div>
+        <div class="pagination">
+          <button id="prevBtn" type="button">Previous</button>
+          <span id="pageLabel">Page 1</span>
+          <button id="nextBtn" type="button">Next</button>
+        </div>
+      </div>
+      <div id="resultsGrid" class="grid"></div>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      className: 'all',
+      captureReason: 'all',
+      limit: 24,
+      offset: 0,
+      total: 0,
+      loading: false,
+    };
+
+    const classFilter = document.getElementById('classFilter');
+    const captureReasonFilter = document.getElementById('captureReasonFilter');
+    const limitFilter = document.getElementById('limitFilter');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const pageLabel = document.getElementById('pageLabel');
+    const resultsNote = document.getElementById('resultsNote');
+    const resultsGrid = document.getElementById('resultsGrid');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function formatValue(value, fallback = 'n/a') {
+      if (value === null || value === undefined || value === '') {
+        return fallback;
+      }
+      if (typeof value === 'boolean') {
+        return value ? 'yes' : 'no';
+      }
+      return String(value);
+    }
+
+    function formatTimestamp(value) {
+      if (!value) {
+        return 'Unknown timestamp';
+      }
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) {
+        return String(value);
+      }
+      return parsed.toLocaleString();
+    }
+
+    function buildQuery() {
+      const params = new URLSearchParams();
+      params.set('state', 'all');
+      params.set('identity', 'all');
+      params.set('limit', String(state.limit));
+      params.set('offset', String(state.offset));
+      if (state.className !== 'all') {
+        params.set('class', state.className);
+      }
+      if (state.captureReason !== 'all') {
+        params.set('capture_reason', state.captureReason);
+      }
+      return params;
+    }
+
+    function syncUrl() {
+      const params = new URLSearchParams();
+      if (state.className !== 'all') {
+        params.set('class', state.className);
+      }
+      if (state.captureReason !== 'all') {
+        params.set('capture_reason', state.captureReason);
+      }
+      if (state.limit !== 24) {
+        params.set('limit', String(state.limit));
+      }
+      if (state.offset > 0) {
+        params.set('offset', String(state.offset));
+      }
+      const query = params.toString();
+      const nextUrl = query ? `/review/browser?${query}` : '/review/browser';
+      history.replaceState(null, '', nextUrl);
+    }
+
+    function applyUrlState() {
+      const params = new URLSearchParams(window.location.search);
+      const limit = Number.parseInt(params.get('limit') || '24', 10);
+      const offset = Number.parseInt(params.get('offset') || '0', 10);
+      state.className = params.get('class') || 'all';
+      state.captureReason = params.get('capture_reason') || 'all';
+      state.limit = Number.isFinite(limit) && limit > 0 ? limit : 24;
+      state.offset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+      limitFilter.value = String(state.limit);
+    }
+
+    function updateSelectOptions(selectEl, values, selectedValue, allLabel) {
+      const previous = selectedValue || 'all';
+      selectEl.innerHTML = `<option value="all">${allLabel}</option>`;
+      for (const value of values) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        if (value === previous) {
+          option.selected = true;
+        }
+        selectEl.appendChild(option);
+      }
+      if (![...selectEl.options].some((option) => option.value === previous)) {
+        selectEl.value = 'all';
+      }
+    }
+
+    function renderCard(item) {
+      const effectiveClass = item.corrected_class_name || item.class_name || 'unknown';
+      const cropMarkup = item.crop_url
+        ? `<img src="${escapeHtml(item.crop_url)}" alt="Candidate crop for ${escapeHtml(item.candidate_id)}" loading="lazy"/>`
+        : '<div class="media-empty">Crop file is missing.</div>';
+      const frameMarkup = item.frame_url
+        ? `<img src="${escapeHtml(item.frame_url)}" alt="Full frame for ${escapeHtml(item.candidate_id)}" loading="lazy"/>`
+        : '<div class="media-empty">No retained full frame.</div>';
+
+      return `
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <h2>${escapeHtml(item.candidate_id)}</h2>
+              <p>${escapeHtml(formatTimestamp(item.timestamp))}</p>
+            </div>
+            <div class="state-pill">${escapeHtml(item.review_state || 'unreviewed')}</div>
+          </div>
+          <div class="media-strip">
+            <section class="media-box">
+              <div class="media-label">Crop</div>
+              ${cropMarkup}
+            </section>
+            <section class="media-box">
+              <div class="media-label">Full frame</div>
+              ${frameMarkup}
+            </section>
+          </div>
+          <div class="chips">
+            <span class="chip">class: ${escapeHtml(formatValue(item.class_name))}</span>
+            <span class="chip">effective: ${escapeHtml(formatValue(effectiveClass))}</span>
+            <span class="chip">capture: ${escapeHtml(formatValue(item.capture_reason))}</span>
+            <span class="chip">sample: ${escapeHtml(formatValue(item.sample_kind))}</span>
+          </div>
+          <div class="meta-grid">
+            <div class="meta-card"><span>Corrected class</span><strong>${escapeHtml(formatValue(item.corrected_class_name))}</strong></div>
+            <div class="meta-card"><span>Identity label</span><strong>${escapeHtml(formatValue(item.identity_label))}</strong></div>
+            <div class="meta-card"><span>Visibility state</span><strong>${escapeHtml(formatValue(item.visibility_state))}</strong></div>
+            <div class="meta-card"><span>BBox review state</span><strong>${escapeHtml(formatValue(item.bbox_review_state))}</strong></div>
+            <div class="meta-card"><span>Rabbit alias</span><strong>${escapeHtml(formatValue(item.is_rabbit_alias))}</strong></div>
+            <div class="meta-card"><span>Frame retained</span><strong>${escapeHtml(formatValue(item.full_frame_retained))}</strong></div>
+          </div>
+          <div class="card-foot">
+            <code>${escapeHtml(item.metadata_path || 'metadata unavailable')}</code>
+            <span>Future naming/tagging can attach to this candidate ID through the existing review API.</span>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderEmptyState(message) {
+      resultsGrid.innerHTML = `
+        <div class="empty-state">
+          <h2>No candidates to show</h2>
+          <p>${escapeHtml(message)}</p>
+        </div>
+      `;
+    }
+
+    function renderPayload(payload) {
+      state.total = payload.total || 0;
+      document.getElementById('filteredCount').textContent = String(payload.total || 0);
+      document.getElementById('summaryTotal').textContent = String(payload.summary?.total || 0);
+      document.getElementById('summaryUnreviewed').textContent = String(payload.summary?.unreviewed || 0);
+      document.getElementById('summaryLabeled').textContent = String(payload.summary?.labeled || 0);
+
+      updateSelectOptions(classFilter, payload.available_classes || [], state.className, 'All classes');
+      updateSelectOptions(captureReasonFilter, payload.available_capture_reasons || [], state.captureReason, 'All reasons');
+
+      const pageIndex = Math.floor((payload.offset || 0) / Math.max(payload.limit || state.limit, 1)) + 1;
+      const totalPages = payload.limit ? Math.max(1, Math.ceil((payload.total || 0) / payload.limit)) : 1;
+      pageLabel.textContent = `Page ${pageIndex} of ${totalPages}`;
+      prevBtn.disabled = !payload.has_previous;
+      nextBtn.disabled = !payload.has_next;
+      resultsNote.textContent = `${payload.returned || 0} shown, ${payload.total || 0} matching, newest first.`;
+
+      if (!payload.items || payload.items.length === 0) {
+        const hasFilters = state.className !== 'all' || state.captureReason !== 'all';
+        renderEmptyState(hasFilters ? 'Try clearing the filters or reducing the page offset.' : 'The filesystem candidate store is currently empty.');
+        return;
+      }
+
+      resultsGrid.innerHTML = payload.items.map(renderCard).join('');
+    }
+
+    async function loadCandidates() {
+      if (state.loading) {
+        return;
+      }
+      state.loading = true;
+      resultsNote.textContent = 'Loading candidates...';
+      syncUrl();
+
+      try {
+        const response = await fetch(`/api/review/candidates?${buildQuery().toString()}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to load candidates');
+        }
+        renderPayload(payload);
+      } catch (error) {
+        renderEmptyState(error.message || 'Failed to load candidates.');
+        resultsNote.textContent = 'Candidate browser unavailable.';
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    classFilter.addEventListener('change', () => {
+      state.className = classFilter.value;
+      state.offset = 0;
+      loadCandidates();
+    });
+
+    captureReasonFilter.addEventListener('change', () => {
+      state.captureReason = captureReasonFilter.value;
+      state.offset = 0;
+      loadCandidates();
+    });
+
+    limitFilter.addEventListener('change', () => {
+      state.limit = Number.parseInt(limitFilter.value, 10) || 24;
+      state.offset = 0;
+      loadCandidates();
+    });
+
+    refreshBtn.addEventListener('click', () => {
+      loadCandidates();
+    });
+
+    prevBtn.addEventListener('click', () => {
+      state.offset = Math.max(0, state.offset - state.limit);
+      loadCandidates();
+    });
+
+    nextBtn.addEventListener('click', () => {
+      state.offset += state.limit;
+      loadCandidates();
+    });
+
+    applyUrlState();
+    loadCandidates();
+  </script>
+</body>
+</html>
