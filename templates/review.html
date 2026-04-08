@@ -514,6 +514,11 @@
     const summaryUnreviewed = document.getElementById('summaryUnreviewed');
     const summaryApproved = document.getElementById('summaryApproved');
     const summaryRejected = document.getElementById('summaryRejected');
+    const handoffCandidateId = new URLSearchParams(window.location.search).get('candidate_id');
+
+    if (handoffCandidateId) {
+      stateFilter.value = 'all';
+    }
 
     let queueItems = [];
     let currentIndex = -1;
@@ -754,7 +759,7 @@
       }
     });
 
-    loadQueue();
+    loadQueue(handoffCandidateId);
     loadGalleryStatus();
   </script>
 </body>

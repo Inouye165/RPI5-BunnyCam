@@ -333,6 +333,27 @@ def test_identity_label_assignment_persists_correctly(tmp_path):
     assert reloaded["effective_class_name"] == "dog"
 
 
+def test_label_and_class_update_refreshes_approved_manifest_immediately(tmp_path):
+    collector = _collector(tmp_path)
+    record = collector.collect(_frame(), [_detection(class_name="cat", track_id=14)], captured_at=100.0)[0]
+    queue = _review_queue(tmp_path)
+
+    queue.update_candidate(record["candidate_id"], review_state="approved")
+    queue.update_candidate(record["candidate_id"], identity_label="Hazel", corrected_class_name="bunny")
+
+    reloaded = _review_queue(tmp_path).get_candidate(record["candidate_id"])
+    approved_manifest = json.loads(
+        (tmp_path / "data" / "candidates" / "review" / "approved_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert reloaded["review_state"] == "approved"
+    assert reloaded["identity_label"] == "Hazel"
+    assert reloaded["corrected_class_name"] == "bunny"
+    assert approved_manifest["items"][0]["candidate_id"] == record["candidate_id"]
+    assert approved_manifest["items"][0]["identity_label"] == "Hazel"
+    assert approved_manifest["items"][0]["effective_class_name"] == "bunny"
+
+
 def test_review_queue_filters_by_state_and_class(tmp_path):
     collector = _collector(tmp_path)
     person = collector.collect(_frame(), [_detection(class_name="person", track_id=21)], captured_at=100.0)[0]
